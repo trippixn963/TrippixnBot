@@ -7,11 +7,11 @@ Image search using DuckDuckGo (free, no API key needed).
 Author: حَـــــنَّـــــا
 """
 
-import aiohttp
-import re
-import json
+import asyncio
 from dataclasses import dataclass
 from typing import Optional
+
+from duckduckgo_search import DDGS
 
 from src.core import log
 
@@ -80,94 +80,32 @@ class ImageService:
 
         # Map safe search levels
         safe_map = {
-            "off": "-2",
-            "medium": "-1",
-            "high": "1",
+            "off": "off",
+            "medium": "moderate",
+            "high": "strict",
         }
-        safe_param = safe_map.get(safe_search, "-1")
+        safe_param = safe_map.get(safe_search, "moderate")
 
         try:
-            # First, get the vqd token from DuckDuckGo
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            }
-
-            async with aiohttp.ClientSession() as session:
-                # Get vqd token
-                token_url = f"https://duckduckgo.com/?q={query}&iax=images&ia=images"
-                async with session.get(token_url, headers=headers) as resp:
-                    if resp.status != 200:
-                        return ImageSearchResult(
-                            success=False,
-                            query=query,
-                            images=[],
-                            total_results=0,
-                            error=f"Failed to get search token: {resp.status}"
-                        )
-
-                    html = await resp.text()
-
-                    # Extract vqd token
-                    vqd_match = re.search(r'vqd=(["\'])([^"\']+)\1', html)
-                    if not vqd_match:
-                        vqd_match = re.search(r'vqd=(\d+-\d+(?:-\d+)?)', html)
-
-                    if not vqd_match:
-                        return ImageSearchResult(
-                            success=False,
-                            query=query,
-                            images=[],
-                            total_results=0,
-                            error="Could not extract search token"
-                        )
-
-                    vqd = vqd_match.group(2) if vqd_match.lastindex == 2 else vqd_match.group(1)
-
-                # Now search for images
-                search_url = "https://duckduckgo.com/i.js"
-                params = {
-                    "l": "us-en",
-                    "o": "json",
-                    "q": query,
-                    "vqd": vqd,
-                    "f": ",,,,,",
-                    "p": safe_param,
-                }
-
-                async with session.get(search_url, params=params, headers=headers) as resp:
-                    if resp.status != 200:
-                        return ImageSearchResult(
-                            success=False,
-                            query=query,
-                            images=[],
-                            total_results=0,
-                            error=f"Image search failed: {resp.status}"
-                        )
-
-                    data = await resp.json()
-
-            # Parse results
-            images = []
-            results = data.get("results", [])
-
-            for item in results[:num_results]:
-                images.append(ImageResult(
-                    url=item.get("image", ""),
-                    title=item.get("title", "No title"),
-                    source_url=item.get("url", ""),
-                    width=item.get("width", 0),
-                    height=item.get("height", 0),
-                ))
+            # Run in thread pool since DDGS is sync
+            loop = asyncio.get_event_loop()
+            results = await loop.run_in_executor(
+                None,
+                self._search_sync,
+                query,
+                num_results,
+                safe_param
+            )
 
             log.tree("Image Search Complete", [
-                ("Results", len(images)),
+                ("Results", len(results)),
             ], emoji="✅")
 
             return ImageSearchResult(
                 success=True,
                 query=query,
-                images=images,
-                total_results=len(images),
+                images=results,
+                total_results=len(results),
             )
 
         except Exception as e:
@@ -182,6 +120,28 @@ class ImageService:
                 total_results=0,
                 error=str(e)
             )
+
+    def _search_sync(self, query: str, num_results: int, safe_search: str) -> list[ImageResult]:
+        """Synchronous search using DDGS."""
+        images = []
+
+        with DDGS() as ddgs:
+            results = ddgs.images(
+                keywords=query,
+                max_results=num_results,
+                safesearch=safe_search,
+            )
+
+            for item in results:
+                images.append(ImageResult(
+                    url=item.get("image", ""),
+                    title=item.get("title", "No title"),
+                    source_url=item.get("url", ""),
+                    width=item.get("width", 0),
+                    height=item.get("height", 0),
+                ))
+
+        return images
 
 
 # Global instance
