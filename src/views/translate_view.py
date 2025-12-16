@@ -301,9 +301,39 @@ class TranslateView(ui.View):
             source_lang="auto"  # Always detect from original
         )
 
+        # Get channel/guild info for webhook
+        channel_name = interaction.channel.name if hasattr(interaction.channel, 'name') else str(interaction.channel_id)
+        guild_name = interaction.guild.name if interaction.guild else "DM"
+
         if not result.success:
             await interaction.followup.send(
                 f"Translation failed: {result.error}",
+                ephemeral=True
+            )
+            # Send failure webhook
+            await send_translate_webhook(
+                success=False,
+                user=interaction.user,
+                source_type="button",
+                source_lang=self.source_lang,
+                target_lang=target_lang,
+                source_name="Unknown",
+                target_name=target_lang,
+                source_flag="🌐",
+                target_flag="🌐",
+                original_text=self.original_text,
+                translated_text="",
+                channel_name=channel_name,
+                guild_name=guild_name,
+                error=result.error,
+            )
+            return
+
+        # Check if already in target language
+        if result.source_lang == result.target_lang:
+            target_name = LANGUAGES.get(result.target_lang, (result.target_lang, "🌐"))[0]
+            await interaction.followup.send(
+                f"This text is already in {target_name}.",
                 ephemeral=True
             )
             return
@@ -332,6 +362,31 @@ class TranslateView(ui.View):
             ("To", f"{result.target_name} ({result.target_lang})"),
             ("User", str(interaction.user)),
         ], emoji="✅")
+
+        # Send success webhook for button re-translation
+        # Get message jump URL from original response
+        try:
+            msg = await interaction.original_response()
+            message_jump_url = msg.jump_url if msg else None
+        except Exception:
+            message_jump_url = None
+
+        await send_translate_webhook(
+            success=True,
+            user=interaction.user,
+            source_type="button",
+            source_lang=result.source_lang,
+            target_lang=result.target_lang,
+            source_name=result.source_name,
+            target_name=result.target_name,
+            source_flag=result.source_flag,
+            target_flag=result.target_flag,
+            original_text=result.original_text,
+            translated_text=result.translated_text,
+            channel_name=channel_name,
+            guild_name=guild_name,
+            message_jump_url=message_jump_url,
+        )
 
 
 def create_translate_embed(
