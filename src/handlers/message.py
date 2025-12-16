@@ -19,7 +19,7 @@ from src.core import config, log
 from src.services import ai_service, stats_store
 from src.services.downloader import downloader
 from src.services.translate_service import translate_service
-from src.views.translate_view import TranslateView, create_translate_embed
+from src.views.translate_view import TranslateView, create_translate_embed, send_translate_webhook
 
 
 # Lanyard API URL for fetching real-time presence
@@ -560,6 +560,10 @@ async def _handle_reply_translate(message: discord.Message, target_lang: str = "
         ("Target Lang", target_lang),
     ], emoji="🌐")
 
+    # Get channel/guild info for webhook
+    channel_name = message.channel.name if hasattr(message.channel, 'name') else str(message.channel.id)
+    guild_name = message.guild.name if message.guild else "DM"
+
     # Get the referenced message
     ref = message.reference
     if not ref or not ref.message_id:
@@ -592,6 +596,24 @@ async def _handle_reply_translate(message: discord.Message, target_lang: str = "
             color=0xFF0000
         )
         await message.reply(embed=embed, mention_author=False)
+
+        # Send failure webhook
+        await send_translate_webhook(
+            success=False,
+            user=message.author,
+            source_type="reply",
+            source_lang="unknown",
+            target_lang=target_lang,
+            source_name="Unknown",
+            target_name=target_lang,
+            source_flag="🌐",
+            target_flag="🌐",
+            original_text=text,
+            translated_text="",
+            channel_name=channel_name,
+            guild_name=guild_name,
+            error=result.error,
+        )
         return
 
     # Get developer avatar for footer
@@ -613,13 +635,31 @@ async def _handle_reply_translate(message: discord.Message, target_lang: str = "
         source_lang=result.source_lang,
     )
 
-    await message.reply(embed=embed, view=view, mention_author=False)
+    reply_msg = await message.reply(embed=embed, view=view, mention_author=False)
 
     log.tree("Reply Translate Complete", [
         ("From", f"{result.source_name} ({result.source_lang})"),
         ("To", f"{result.target_name} ({result.target_lang})"),
         ("User", str(message.author)),
     ], emoji="✅")
+
+    # Send success webhook
+    await send_translate_webhook(
+        success=True,
+        user=message.author,
+        source_type="reply",
+        source_lang=result.source_lang,
+        target_lang=result.target_lang,
+        source_name=result.source_name,
+        target_name=result.target_name,
+        source_flag=result.source_flag,
+        target_flag=result.target_flag,
+        original_text=result.original_text,
+        translated_text=result.translated_text,
+        channel_name=channel_name,
+        guild_name=guild_name,
+        message_jump_url=reply_msg.jump_url,
+    )
 
 
 def _parse_translate_command(content: str) -> tuple[bool, str]:
