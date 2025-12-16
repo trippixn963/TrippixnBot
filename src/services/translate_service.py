@@ -131,15 +131,21 @@ class TranslateService:
         Returns:
             Language code or None if not found
         """
-        lang_input = lang_input.lower().strip()
+        lang_input = lang_input.strip()
+        lang_lower = lang_input.lower()
 
-        # Direct code match
+        # Direct code match (case-sensitive first)
         if lang_input in LANGUAGES:
             return lang_input
 
-        # Alias match
-        if lang_input in LANGUAGE_ALIASES:
-            return LANGUAGE_ALIASES[lang_input]
+        # Case-insensitive code match
+        for code in LANGUAGES:
+            if code.lower() == lang_lower:
+                return code
+
+        # Alias match (always lowercase)
+        if lang_lower in LANGUAGE_ALIASES:
+            return LANGUAGE_ALIASES[lang_lower]
 
         return None
 
