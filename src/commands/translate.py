@@ -13,6 +13,7 @@ from discord.ext import commands
 
 from src.core import config, log
 from src.services.translate_service import translate_service, LANGUAGES
+from src.views.translate_view import TranslateView, create_translate_embed
 
 
 # =============================================================================
@@ -69,35 +70,18 @@ class TranslateCog(commands.Cog):
         except Exception:
             pass
 
-        # Build success embed
-        embed = discord.Embed(
-            title=f"{result.source_flag} → {result.target_flag} Translation",
-            color=0x5865F2
+        # Build embed with code blocks
+        embed = create_translate_embed(result, developer_avatar)
+
+        # Create interactive view
+        view = TranslateView(
+            original_text=text,
+            requester_id=interaction.user.id,
+            current_lang=result.target_lang,
+            source_lang=result.source_lang,
         )
 
-        # Original text (truncate if too long)
-        original_display = result.original_text
-        if len(original_display) > 1000:
-            original_display = original_display[:997] + "..."
-        embed.add_field(
-            name=f"Original ({result.source_name})",
-            value=original_display,
-            inline=False
-        )
-
-        # Translated text
-        translated_display = result.translated_text
-        if len(translated_display) > 1000:
-            translated_display = translated_display[:997] + "..."
-        embed.add_field(
-            name=f"Translation ({result.target_name})",
-            value=translated_display,
-            inline=False
-        )
-
-        embed.set_footer(text="Developed By: حَـــــنَّـــــا", icon_url=developer_avatar)
-
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(embed=embed, view=view)
 
         log.tree("Translation Sent", [
             ("From", f"{result.source_name} ({result.source_lang})"),
