@@ -616,6 +616,16 @@ async def _handle_reply_translate(message: discord.Message, target_lang: str = "
         )
         return
 
+    # Check if already in target language
+    if result.source_lang == result.target_lang:
+        embed = discord.Embed(
+            title="🌐 Already in Target Language",
+            description=f"This text is already in {result.target_name}.",
+            color=0xFFA500
+        )
+        await message.reply(embed=embed, mention_author=False)
+        return
+
     # Get developer avatar for footer
     developer_avatar = None
     try:

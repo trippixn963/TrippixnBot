@@ -84,6 +84,16 @@ class TranslateCog(commands.Cog):
             )
             return
 
+        # Check if already in target language
+        if result.source_lang == result.target_lang:
+            embed = discord.Embed(
+                title="🌐 Already in Target Language",
+                description=f"This text is already in {result.target_name}.",
+                color=0xFFA500
+            )
+            await interaction.followup.send(embed=embed)
+            return
+
         # Get developer avatar for footer
         developer_avatar = None
         try:
