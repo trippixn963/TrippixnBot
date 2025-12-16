@@ -2,16 +2,18 @@
 TrippixnBot - Image Search Service
 ==================================
 
-Image search using Google Custom Search API.
+Image search using DuckDuckGo (free, no API key needed).
 
 Author: حَـــــنَّـــــا
 """
 
 import aiohttp
+import re
+import json
 from dataclasses import dataclass
 from typing import Optional
 
-from src.core import config, log
+from src.core import log
 
 
 # =============================================================================
@@ -43,19 +45,11 @@ class ImageSearchResult:
 # =============================================================================
 
 class ImageService:
-    """Service for searching images via Google Custom Search API."""
-
-    SEARCH_URL = "https://www.googleapis.com/customsearch/v1"
+    """Service for searching images via DuckDuckGo."""
 
     def __init__(self):
-        self.api_key = config.GOOGLE_API_KEY
-        self.cx = config.GOOGLE_CX
-        self._available = bool(self.api_key and self.cx)
-
-        if self._available:
-            log.success("Image Search Service initialized")
-        else:
-            log.warning("Image Search Service disabled - missing GOOGLE_API_KEY or GOOGLE_CX")
+        self._available = True
+        log.success("Image Search Service initialized (DuckDuckGo)")
 
     @property
     def is_available(self) -> bool:
@@ -68,85 +62,112 @@ class ImageService:
         safe_search: str = "medium"
     ) -> ImageSearchResult:
         """
-        Search for images.
+        Search for images using DuckDuckGo.
 
         Args:
             query: Search query
-            num_results: Number of results to fetch (max 10 per request)
+            num_results: Number of results to fetch
             safe_search: SafeSearch level (off, medium, high)
 
         Returns:
             ImageSearchResult with list of images
         """
-        if not self._available:
-            return ImageSearchResult(
-                success=False,
-                query=query,
-                images=[],
-                total_results=0,
-                error="Image search is not configured. Missing API credentials."
-            )
-
         log.tree("Image Search", [
             ("Query", query),
             ("Results", num_results),
             ("SafeSearch", safe_search),
         ], emoji="🖼️")
 
+        # Map safe search levels
+        safe_map = {
+            "off": "-2",
+            "medium": "-1",
+            "high": "1",
+        }
+        safe_param = safe_map.get(safe_search, "-1")
+
         try:
-            params = {
-                "key": self.api_key,
-                "cx": self.cx,
-                "q": query,
-                "searchType": "image",
-                "num": min(num_results, 10),
-                "safe": safe_search,
+            # First, get the vqd token from DuckDuckGo
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             }
 
             async with aiohttp.ClientSession() as session:
-                async with session.get(self.SEARCH_URL, params=params) as resp:
+                # Get vqd token
+                token_url = f"https://duckduckgo.com/?q={query}&iax=images&ia=images"
+                async with session.get(token_url, headers=headers) as resp:
                     if resp.status != 200:
-                        error_text = await resp.text()
-                        log.error("Image search failed", [
-                            ("Status", resp.status),
-                            ("Error", error_text[:200]),
-                        ])
                         return ImageSearchResult(
                             success=False,
                             query=query,
                             images=[],
                             total_results=0,
-                            error=f"Google API error: {resp.status}"
+                            error=f"Failed to get search token: {resp.status}"
+                        )
+
+                    html = await resp.text()
+
+                    # Extract vqd token
+                    vqd_match = re.search(r'vqd=(["\'])([^"\']+)\1', html)
+                    if not vqd_match:
+                        vqd_match = re.search(r'vqd=(\d+-\d+(?:-\d+)?)', html)
+
+                    if not vqd_match:
+                        return ImageSearchResult(
+                            success=False,
+                            query=query,
+                            images=[],
+                            total_results=0,
+                            error="Could not extract search token"
+                        )
+
+                    vqd = vqd_match.group(2) if vqd_match.lastindex == 2 else vqd_match.group(1)
+
+                # Now search for images
+                search_url = "https://duckduckgo.com/i.js"
+                params = {
+                    "l": "us-en",
+                    "o": "json",
+                    "q": query,
+                    "vqd": vqd,
+                    "f": ",,,,,",
+                    "p": safe_param,
+                }
+
+                async with session.get(search_url, params=params, headers=headers) as resp:
+                    if resp.status != 200:
+                        return ImageSearchResult(
+                            success=False,
+                            query=query,
+                            images=[],
+                            total_results=0,
+                            error=f"Image search failed: {resp.status}"
                         )
 
                     data = await resp.json()
 
             # Parse results
             images = []
-            items = data.get("items", [])
+            results = data.get("results", [])
 
-            for item in items:
-                image_info = item.get("image", {})
+            for item in results[:num_results]:
                 images.append(ImageResult(
-                    url=item.get("link", ""),
+                    url=item.get("image", ""),
                     title=item.get("title", "No title"),
-                    source_url=image_info.get("contextLink", ""),
-                    width=image_info.get("width", 0),
-                    height=image_info.get("height", 0),
+                    source_url=item.get("url", ""),
+                    width=item.get("width", 0),
+                    height=item.get("height", 0),
                 ))
-
-            total = int(data.get("searchInformation", {}).get("totalResults", 0))
 
             log.tree("Image Search Complete", [
                 ("Results", len(images)),
-                ("Total Available", total),
             ], emoji="✅")
 
             return ImageSearchResult(
                 success=True,
                 query=query,
                 images=images,
-                total_results=total,
+                total_results=len(images),
             )
 
         except Exception as e:
