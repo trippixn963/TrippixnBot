@@ -626,6 +626,12 @@ def _parse_translate_command(content: str) -> tuple[bool, str]:
     """
     Parse translate/tr command from message content.
 
+    Supported formats:
+    - "translate" or "tr" -> English (default)
+    - "translate ar" or "tr arabic" -> Arabic
+    - "translate to arabic" or "tr to ar" -> Arabic
+    - "translate to english" or "tr to en" -> English
+
     Returns:
         (is_translate_command, target_language)
     """
@@ -635,18 +641,35 @@ def _parse_translate_command(content: str) -> tuple[bool, str]:
     if content in ("translate", "tr"):
         return (True, "en")
 
-    # "translate ar" or "tr arabic" etc.
-    parts = content.split(None, 1)
-    if len(parts) == 2 and parts[0] in ("translate", "tr"):
-        lang = parts[1].strip()
-        # Validate language
+    # Split into parts
+    parts = content.split()
+
+    # Must start with translate or tr
+    if not parts or parts[0] not in ("translate", "tr"):
+        return (False, "")
+
+    # Handle different formats
+    if len(parts) == 2:
+        # "translate ar" or "tr arabic"
+        lang = parts[1]
         resolved = translate_service.resolve_language(lang)
         if resolved:
             return (True, resolved)
-        # Invalid language, still a translate command but return default
+        # Invalid language, default to English
         return (True, "en")
 
-    return (False, "")
+    elif len(parts) >= 3 and parts[1] == "to":
+        # "translate to arabic" or "tr to en"
+        # Join everything after "to" in case of multi-word language names
+        lang = " ".join(parts[2:])
+        resolved = translate_service.resolve_language(lang)
+        if resolved:
+            return (True, resolved)
+        # Invalid language, default to English
+        return (True, "en")
+
+    # If we got here with translate/tr prefix, treat as translate command
+    return (True, "en")
 
 
 # =============================================================================

@@ -15,6 +15,15 @@ from src.core import config, log
 from src.services.translate_service import translate_service, LANGUAGES
 
 
+# Quick access buttons config (code, label, emoji)
+QUICK_BUTTONS = [
+    ("en", "English", "🇬🇧"),
+    ("ar", "Arabic", "🇸🇦"),
+    ("fr", "French", "🇫🇷"),
+    ("de", "German", "🇩🇪"),
+]
+
+
 # =============================================================================
 # Language Select Menu
 # =============================================================================
@@ -25,12 +34,13 @@ class LanguageSelect(ui.Select):
     def __init__(self, original_text: str, current_lang: str):
         self.original_text = original_text
 
-        # Build options from common languages (exclude current)
+        # Build options from common languages (exclude current and quick buttons)
         options = []
-        priority_langs = ["en", "ar", "fr", "de", "es", "it", "pt", "ru", "zh-CN", "ja", "ko", "tr", "nl", "pl", "hi", "he", "fa", "ur"]
+        quick_codes = {code for code, _, _ in QUICK_BUTTONS}
+        priority_langs = ["es", "it", "pt", "ru", "zh-CN", "ja", "ko", "tr", "nl", "pl", "hi", "he", "fa", "ur", "sv", "el", "cs", "th", "vi"]
 
         for code in priority_langs:
-            if code == current_lang:
+            if code == current_lang or code in quick_codes:
                 continue
             if code in LANGUAGES:
                 name, flag = LANGUAGES[code]
@@ -43,12 +53,15 @@ class LanguageSelect(ui.Select):
                 break
 
         super().__init__(
-            placeholder="Select language...",
-            options=options,
+            placeholder="More languages...",
+            options=options if options else [discord.SelectOption(label="No more languages", value="none")],
             row=1,
         )
 
     async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "none":
+            await interaction.response.defer()
+            return
         target_lang = self.values[0]
         await self.view.translate_to(interaction, target_lang)
 
@@ -74,8 +87,36 @@ class TranslateView(ui.View):
         self.current_lang = current_lang
         self.source_lang = source_lang
 
+        # Build the view with buttons
+        self._rebuild_buttons()
+
+    def _rebuild_buttons(self):
+        """Rebuild buttons based on current language."""
+        self.clear_items()
+
+        # Add quick translation buttons (skip current language)
+        for code, label, emoji in QUICK_BUTTONS:
+            if code == self.current_lang:
+                continue  # Skip button for current language
+
+            button = ui.Button(
+                label=label,
+                emoji=emoji,
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"translate_{code}",
+                row=0,
+            )
+            button.callback = self._make_button_callback(code)
+            self.add_item(button)
+
         # Add language select dropdown
-        self.add_item(LanguageSelect(original_text, current_lang))
+        self.add_item(LanguageSelect(self.original_text, self.current_lang))
+
+    def _make_button_callback(self, target_lang: str):
+        """Create a callback for a language button."""
+        async def callback(interaction: discord.Interaction):
+            await self.translate_to(interaction, target_lang)
+        return callback
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         """Only allow the requester to use buttons."""
@@ -91,15 +132,15 @@ class TranslateView(ui.View):
         """Disable buttons on timeout."""
         for item in self.children:
             item.disabled = True
-        # We can't edit the message here without the message reference
 
     async def translate_to(self, interaction: discord.Interaction, target_lang: str):
         """Translate to a new language and update the embed."""
-        await interaction.response.defer()
-
         # Don't re-translate if same language
         if target_lang == self.current_lang:
+            await interaction.response.defer()
             return
+
+        await interaction.response.defer()
 
         log.tree("Re-translating", [
             ("From", self.source_lang),
@@ -111,7 +152,7 @@ class TranslateView(ui.View):
         result = await translate_service.translate(
             self.original_text,
             target_lang=target_lang,
-            source_lang=self.source_lang
+            source_lang="auto"  # Always detect from original
         )
 
         if not result.success:
@@ -125,6 +166,9 @@ class TranslateView(ui.View):
         self.current_lang = target_lang
         self.source_lang = result.source_lang
 
+        # Rebuild buttons (will hide the new current language button)
+        self._rebuild_buttons()
+
         # Get developer avatar for footer
         developer_avatar = None
         try:
@@ -134,70 +178,14 @@ class TranslateView(ui.View):
             pass
 
         # Build updated embed
-        embed = self._build_embed(result, developer_avatar)
-
-        # Update the select menu to exclude current language
-        self.clear_items()
-        self._add_buttons()
-        self.add_item(LanguageSelect(self.original_text, self.current_lang))
+        embed = create_translate_embed(result, developer_avatar)
 
         await interaction.edit_original_response(embed=embed, view=self)
 
-    def _build_embed(self, result, developer_avatar: Optional[str] = None) -> discord.Embed:
-        """Build the translation embed."""
-        embed = discord.Embed(
-            title=f"{result.source_flag} → {result.target_flag} Translation",
-            color=0x5865F2
-        )
-
-        # Original text in code block (truncate if too long)
-        original_display = result.original_text
-        if len(original_display) > 900:
-            original_display = original_display[:897] + "..."
-        embed.add_field(
-            name=f"Original ({result.source_name})",
-            value=f"```\n{original_display}\n```",
-            inline=False
-        )
-
-        # Translated text in code block
-        translated_display = result.translated_text
-        if len(translated_display) > 900:
-            translated_display = translated_display[:897] + "..."
-        embed.add_field(
-            name=f"Translation ({result.target_name})",
-            value=f"```\n{translated_display}\n```",
-            inline=False
-        )
-
-        embed.set_footer(text="Developed By: حَـــــنَّـــــا", icon_url=developer_avatar)
-
-        return embed
-
-    def _add_buttons(self):
-        """Add the quick translation buttons."""
-        # These are added via decorators below
-        pass
-
-    # ==========================================================================
-    # Quick Translation Buttons (Row 0)
-    # ==========================================================================
-
-    @ui.button(label="English", emoji="🇬🇧", style=discord.ButtonStyle.secondary, row=0)
-    async def english_button(self, interaction: discord.Interaction, button: ui.Button):
-        await self.translate_to(interaction, "en")
-
-    @ui.button(label="Arabic", emoji="🇸🇦", style=discord.ButtonStyle.secondary, row=0)
-    async def arabic_button(self, interaction: discord.Interaction, button: ui.Button):
-        await self.translate_to(interaction, "ar")
-
-    @ui.button(label="French", emoji="🇫🇷", style=discord.ButtonStyle.secondary, row=0)
-    async def french_button(self, interaction: discord.Interaction, button: ui.Button):
-        await self.translate_to(interaction, "fr")
-
-    @ui.button(label="German", emoji="🇩🇪", style=discord.ButtonStyle.secondary, row=0)
-    async def german_button(self, interaction: discord.Interaction, button: ui.Button):
-        await self.translate_to(interaction, "de")
+        log.tree("Re-translation Complete", [
+            ("To", f"{result.target_name} ({result.target_lang})"),
+            ("User", str(interaction.user)),
+        ], emoji="✅")
 
 
 def create_translate_embed(
