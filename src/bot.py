@@ -44,6 +44,7 @@ class TrippixnBot(commands.Bot):
 
         # Load command cogs
         await self.load_extension("src.commands.download")
+        await self.load_extension("src.commands.translate")
 
         # Sync slash commands to the guild
         guild = discord.Object(id=config.GUILD_ID)
