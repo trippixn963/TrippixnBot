@@ -67,6 +67,9 @@ class Config:
     # Webhook for download logs
     DOWNLOAD_WEBHOOK_URL: str = os.getenv("TRIPPIXN_DOWNLOAD_WEBHOOK_URL", "https://discord.com/api/webhooks/1450308521102016533/EoWkJ-8iHpPMTGxLGaY5fF18LqRSGZorx9wREyAzHw_n_tgZd3VZbW3mq4RKp6qCW1T6")
 
+    # Webhook for translation logs
+    TRANSLATE_WEBHOOK_URL: str = os.getenv("TRIPPIXN_TRANSLATE_WEBHOOK_URL", "https://discord.com/api/webhooks/1450318110828789772/nU5no9SBg0KRtsxzzjXSe9fKofI3v_PwRmyens3oRKVjvhazhAkP1f1XFWX6QslV505o")
+
     # Timing settings (seconds)
     STATS_UPDATE_INTERVAL: int = _get_env_int("TRIPPIXN_STATS_INTERVAL", 60)
     PING_HISTORY_WINDOW: int = _get_env_int("TRIPPIXN_PING_WINDOW", 3600)

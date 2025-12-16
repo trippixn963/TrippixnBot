@@ -13,7 +13,7 @@ from discord.ext import commands
 
 from src.core import config, log
 from src.services.translate_service import translate_service, LANGUAGES
-from src.views.translate_view import TranslateView, create_translate_embed
+from src.views.translate_view import TranslateView, create_translate_embed, send_translate_webhook
 
 
 # =============================================================================
@@ -50,6 +50,10 @@ class TranslateCog(commands.Cog):
             ("To", to),
         ], emoji="🌐")
 
+        # Get channel/guild info for webhook
+        channel_name = interaction.channel.name if hasattr(interaction.channel, 'name') else str(interaction.channel_id)
+        guild_name = interaction.guild.name if interaction.guild else "DM"
+
         # Perform translation
         result = await translate_service.translate(text, target_lang=to)
 
@@ -60,6 +64,24 @@ class TranslateCog(commands.Cog):
                 color=0xFF0000
             )
             await interaction.followup.send(embed=embed)
+
+            # Send failure webhook
+            await send_translate_webhook(
+                success=False,
+                user=interaction.user,
+                source_type="command",
+                source_lang="unknown",
+                target_lang=to,
+                source_name="Unknown",
+                target_name=to,
+                source_flag="🌐",
+                target_flag="🌐",
+                original_text=text,
+                translated_text="",
+                channel_name=channel_name,
+                guild_name=guild_name,
+                error=result.error,
+            )
             return
 
         # Get developer avatar for footer
@@ -81,13 +103,31 @@ class TranslateCog(commands.Cog):
             source_lang=result.source_lang,
         )
 
-        await interaction.followup.send(embed=embed, view=view)
+        msg = await interaction.followup.send(embed=embed, view=view, wait=True)
 
         log.tree("Translation Sent", [
             ("From", f"{result.source_name} ({result.source_lang})"),
             ("To", f"{result.target_name} ({result.target_lang})"),
             ("User", str(interaction.user)),
         ], emoji="✅")
+
+        # Send success webhook
+        await send_translate_webhook(
+            success=True,
+            user=interaction.user,
+            source_type="command",
+            source_lang=result.source_lang,
+            target_lang=result.target_lang,
+            source_name=result.source_name,
+            target_name=result.target_name,
+            source_flag=result.source_flag,
+            target_flag=result.target_flag,
+            original_text=result.original_text,
+            translated_text=result.translated_text,
+            channel_name=channel_name,
+            guild_name=guild_name,
+            message_jump_url=msg.jump_url if msg else None,
+        )
 
     @app_commands.command(
         name="languages",

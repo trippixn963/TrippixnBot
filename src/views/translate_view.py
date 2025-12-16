@@ -8,19 +8,147 @@ Author: حَـــــنَّـــــا
 """
 
 import discord
+import aiohttp
 from discord import ui
 from typing import Optional
+from datetime import datetime, timezone
 
 from src.core import config, log
 from src.services.translate_service import translate_service, LANGUAGES
 
 
-# Quick access buttons config (code, label, emoji)
-QUICK_BUTTONS = [
+# =============================================================================
+# Webhook Logging
+# =============================================================================
+
+async def send_translate_webhook(
+    success: bool,
+    user: discord.User,
+    source_type: str,  # "command" or "reply"
+    source_lang: str,
+    target_lang: str,
+    source_name: str,
+    target_name: str,
+    source_flag: str,
+    target_flag: str,
+    original_text: str,
+    translated_text: str,
+    channel_name: str,
+    guild_name: str,
+    message_jump_url: str = None,
+    error: str = None,
+) -> None:
+    """Send translation log to webhook."""
+    if not config.TRANSLATE_WEBHOOK_URL:
+        return
+
+    try:
+        color = 0x5865F2 if success else 0xFF0000
+        status_text = "✅ Success" if success else "❌ Failed"
+        source_icon = "💬" if source_type == "reply" else "/"
+
+        embed = {
+            "title": f"{source_flag} → {target_flag} Translation {'Completed' if success else 'Failed'}",
+            "color": color,
+            "fields": [
+                {
+                    "name": "Status",
+                    "value": status_text,
+                    "inline": True,
+                },
+                {
+                    "name": "Type",
+                    "value": f"{source_icon} {source_type.title()}",
+                    "inline": True,
+                },
+                {
+                    "name": "Requested By",
+                    "value": f"**{user.display_name}** (`{user.id}`)",
+                    "inline": True,
+                },
+                {
+                    "name": "Languages",
+                    "value": f"{source_flag} {source_name} → {target_flag} {target_name}",
+                    "inline": True,
+                },
+                {
+                    "name": "Server",
+                    "value": guild_name,
+                    "inline": True,
+                },
+                {
+                    "name": "Channel",
+                    "value": f"#{channel_name}",
+                    "inline": True,
+                },
+            ],
+            "thumbnail": {"url": user.display_avatar.url} if user.display_avatar else None,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "footer": {"text": "TrippixnBot Translation Logs"},
+        }
+
+        # Add original text (truncated)
+        original_display = original_text[:500] + "..." if len(original_text) > 500 else original_text
+        embed["fields"].append({
+            "name": f"Original ({source_name})",
+            "value": f"```\n{original_display}\n```",
+            "inline": False,
+        })
+
+        # Add translated text if success
+        if success and translated_text:
+            translated_display = translated_text[:500] + "..." if len(translated_text) > 500 else translated_text
+            embed["fields"].append({
+                "name": f"Translation ({target_name})",
+                "value": f"```\n{translated_display}\n```",
+                "inline": False,
+            })
+
+        # Add message link if available
+        if message_jump_url:
+            embed["fields"].append({
+                "name": "View Translation",
+                "value": f"[Jump to Message]({message_jump_url})",
+                "inline": False,
+            })
+
+        # Add error if failed
+        if not success and error:
+            embed["fields"].append({
+                "name": "Error",
+                "value": error[:500],
+                "inline": False,
+            })
+
+        # Remove None thumbnail
+        if not embed.get("thumbnail", {}).get("url"):
+            embed.pop("thumbnail", None)
+
+        async with aiohttp.ClientSession() as session:
+            payload = {"embeds": [embed]}
+            async with session.post(config.TRANSLATE_WEBHOOK_URL, json=payload) as resp:
+                if resp.status in (200, 204):
+                    log.info("Translation webhook sent")
+                else:
+                    log.warning(f"Translation webhook returned status {resp.status}")
+
+    except Exception as e:
+        log.error("Failed to send translation webhook", [
+            ("Error", type(e).__name__),
+            ("Message", str(e)),
+        ])
+
+
+# Priority languages for quick buttons (will show top 4 excluding current)
+PRIORITY_LANGUAGES = [
     ("en", "English", "🇬🇧"),
     ("ar", "Arabic", "🇸🇦"),
     ("fr", "French", "🇫🇷"),
     ("de", "German", "🇩🇪"),
+    ("es", "Spanish", "🇪🇸"),
+    ("ru", "Russian", "🇷🇺"),
+    ("tr", "Turkish", "🇹🇷"),
+    ("zh-CN", "Chinese", "🇨🇳"),
 ]
 
 
@@ -31,16 +159,27 @@ QUICK_BUTTONS = [
 class LanguageSelect(ui.Select):
     """Dropdown to select a language for translation."""
 
-    def __init__(self, original_text: str, current_lang: str):
+    def __init__(self, original_text: str, current_lang: str, shown_buttons: set[str]):
         self.original_text = original_text
 
-        # Build options from common languages (exclude current and quick buttons)
+        # Build options from all languages (exclude current and shown buttons)
         options = []
-        quick_codes = {code for code, _, _ in QUICK_BUTTONS}
-        priority_langs = ["es", "it", "pt", "ru", "zh-CN", "ja", "ko", "tr", "nl", "pl", "hi", "he", "fa", "ur", "sv", "el", "cs", "th", "vi"]
+        # Additional languages not in priority list
+        extra_langs = ["it", "pt", "ja", "ko", "nl", "pl", "hi", "he", "fa", "ur", "sv", "el", "cs", "th", "vi", "id", "uk", "ro", "hu", "da", "no", "fi", "ms"]
 
-        for code in priority_langs:
-            if code == current_lang or code in quick_codes:
+        # First add priority languages that aren't shown as buttons
+        for code, label, emoji in PRIORITY_LANGUAGES:
+            if code == current_lang or code in shown_buttons:
+                continue
+            options.append(discord.SelectOption(
+                label=label,
+                value=code,
+                emoji=emoji,
+            ))
+
+        # Then add extra languages
+        for code in extra_langs:
+            if code == current_lang:
                 continue
             if code in LANGUAGES:
                 name, flag = LANGUAGES[code]
@@ -94,8 +233,10 @@ class TranslateView(ui.View):
         """Rebuild buttons based on current language."""
         self.clear_items()
 
-        # Add quick translation buttons (skip current language)
-        for code, label, emoji in QUICK_BUTTONS:
+        # Add top 4 quick translation buttons (excluding current language)
+        shown_buttons = set()
+        button_count = 0
+        for code, label, emoji in PRIORITY_LANGUAGES:
             if code == self.current_lang:
                 continue  # Skip button for current language
 
@@ -108,9 +249,14 @@ class TranslateView(ui.View):
             )
             button.callback = self._make_button_callback(code)
             self.add_item(button)
+            shown_buttons.add(code)
 
-        # Add language select dropdown
-        self.add_item(LanguageSelect(self.original_text, self.current_lang))
+            button_count += 1
+            if button_count >= 4:
+                break  # Only show 4 buttons
+
+        # Add language select dropdown (exclude languages shown as buttons)
+        self.add_item(LanguageSelect(self.original_text, self.current_lang, shown_buttons))
 
     def _make_button_callback(self, target_lang: str):
         """Create a callback for a language button."""
