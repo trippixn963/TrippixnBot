@@ -19,6 +19,7 @@ from src.core import config, log
 from src.services import ai_service, stats_store
 from src.services.downloader import downloader
 from src.services.translate_service import translate_service
+from src.views.translate_view import TranslateView, create_translate_embed
 
 
 # Lanyard API URL for fetching real-time presence
@@ -601,35 +602,18 @@ async def _handle_reply_translate(message: discord.Message, target_lang: str = "
     except Exception:
         pass
 
-    # Build success embed
-    embed = discord.Embed(
-        title=f"{result.source_flag} → {result.target_flag} Translation",
-        color=0x5865F2
+    # Build embed with code blocks
+    embed = create_translate_embed(result, developer_avatar)
+
+    # Create interactive view (only requester can use buttons)
+    view = TranslateView(
+        original_text=text,
+        requester_id=message.author.id,
+        current_lang=result.target_lang,
+        source_lang=result.source_lang,
     )
 
-    # Original text (truncate if too long)
-    original_display = result.original_text
-    if len(original_display) > 1000:
-        original_display = original_display[:997] + "..."
-    embed.add_field(
-        name=f"Original ({result.source_name})",
-        value=original_display,
-        inline=False
-    )
-
-    # Translated text
-    translated_display = result.translated_text
-    if len(translated_display) > 1000:
-        translated_display = translated_display[:997] + "..."
-    embed.add_field(
-        name=f"Translation ({result.target_name})",
-        value=translated_display,
-        inline=False
-    )
-
-    embed.set_footer(text="Developed By: حَـــــنَّـــــا", icon_url=developer_avatar)
-
-    await message.reply(embed=embed, mention_author=False)
+    await message.reply(embed=embed, view=view, mention_author=False)
 
     log.tree("Reply Translate Complete", [
         ("From", f"{result.source_name} ({result.source_lang})"),
