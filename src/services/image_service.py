@@ -2,16 +2,16 @@
 TrippixnBot - Image Search Service
 ==================================
 
-Image search using DuckDuckGo (free, no API key needed).
+Image search using SearXNG public instances (free, no API key needed).
+Aggregates results from Google, Bing, and other search engines.
 
 Author: حَـــــنَّـــــا
 """
 
-import asyncio
+import aiohttp
+import random
 from dataclasses import dataclass
 from typing import Optional
-
-from duckduckgo_search import DDGS
 
 from src.core import log
 
@@ -41,15 +41,32 @@ class ImageSearchResult:
 
 
 # =============================================================================
+# SearXNG Public Instances (with JSON API enabled)
+# =============================================================================
+
+SEARXNG_INSTANCES = [
+    "https://search.sapti.me",
+    "https://searx.tiekoetter.com",
+    "https://search.bus-hit.me",
+    "https://searx.be",
+    "https://search.ononoki.org",
+    "https://searx.namejeff.xyz",
+    "https://search.rhscz.eu",
+    "https://searx.oxf.fr",
+]
+
+
+# =============================================================================
 # Image Search Service
 # =============================================================================
 
 class ImageService:
-    """Service for searching images via DuckDuckGo."""
+    """Service for searching images via SearXNG."""
 
     def __init__(self):
         self._available = True
-        log.success("Image Search Service initialized (DuckDuckGo)")
+        self._instances = SEARXNG_INSTANCES.copy()
+        log.success("Image Search Service initialized (SearXNG)")
 
     @property
     def is_available(self) -> bool:
@@ -62,7 +79,7 @@ class ImageService:
         safe_search: str = "medium"
     ) -> ImageSearchResult:
         """
-        Search for images using DuckDuckGo.
+        Search for images using SearXNG.
 
         Args:
             query: Search query
@@ -78,70 +95,117 @@ class ImageService:
             ("SafeSearch", safe_search),
         ], emoji="🖼️")
 
-        # Map safe search levels
+        # Map safe search levels (0=off, 1=moderate, 2=strict)
         safe_map = {
-            "off": "off",
-            "medium": "moderate",
-            "high": "strict",
+            "off": 0,
+            "medium": 1,
+            "high": 2,
         }
-        safe_param = safe_map.get(safe_search, "moderate")
+        safe_param = safe_map.get(safe_search, 1)
 
-        try:
-            # Run in thread pool since DDGS is sync
-            loop = asyncio.get_event_loop()
-            results = await loop.run_in_executor(
-                None,
-                self._search_sync,
-                query,
-                num_results,
-                safe_param
-            )
+        # Try multiple instances
+        random.shuffle(self._instances)
+        last_error = None
 
-            log.tree("Image Search Complete", [
-                ("Results", len(results)),
-            ], emoji="✅")
+        for instance in self._instances[:3]:  # Try up to 3 instances
+            try:
+                result = await self._search_instance(
+                    instance, query, num_results, safe_param
+                )
+                if result.success and result.images:
+                    return result
+                last_error = result.error
+            except Exception as e:
+                last_error = str(e)
+                log.warning(f"Instance {instance} failed: {e}")
+                continue
 
-            return ImageSearchResult(
-                success=True,
-                query=query,
-                images=results,
-                total_results=len(results),
-            )
+        return ImageSearchResult(
+            success=False,
+            query=query,
+            images=[],
+            total_results=0,
+            error=last_error or "All search instances failed"
+        )
 
-        except Exception as e:
-            log.error("Image search error", [
-                ("Error", type(e).__name__),
-                ("Message", str(e)),
-            ])
+    async def _search_instance(
+        self,
+        instance: str,
+        query: str,
+        num_results: int,
+        safe_search: int
+    ) -> ImageSearchResult:
+        """Search a specific SearXNG instance."""
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+        }
+
+        params = {
+            "q": query,
+            "categories": "images",
+            "format": "json",
+            "safesearch": safe_search,
+        }
+
+        async with aiohttp.ClientSession() as session:
+            url = f"{instance}/search"
+            async with session.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status != 200:
+                    return ImageSearchResult(
+                        success=False,
+                        query=query,
+                        images=[],
+                        total_results=0,
+                        error=f"{instance}: HTTP {resp.status}"
+                    )
+
+                data = await resp.json()
+
+        # Parse results
+        images = []
+        results = data.get("results", [])
+
+        for item in results[:num_results]:
+            # SearXNG returns different fields for images
+            img_url = item.get("img_src") or item.get("thumbnail_src") or item.get("url", "")
+
+            if not img_url or not img_url.startswith("http"):
+                continue
+
+            images.append(ImageResult(
+                url=img_url,
+                title=item.get("title", "No title"),
+                source_url=item.get("url", ""),
+                width=item.get("img_format", "").split("x")[0] if "x" in str(item.get("img_format", "")) else 0,
+                height=item.get("img_format", "").split("x")[1] if "x" in str(item.get("img_format", "")) else 0,
+            ))
+
+        if not images:
             return ImageSearchResult(
                 success=False,
                 query=query,
                 images=[],
                 total_results=0,
-                error=str(e)
+                error=f"{instance}: No images found"
             )
 
-    def _search_sync(self, query: str, num_results: int, safe_search: str) -> list[ImageResult]:
-        """Synchronous search using DDGS."""
-        images = []
+        log.tree("Image Search Complete", [
+            ("Instance", instance),
+            ("Results", len(images)),
+        ], emoji="✅")
 
-        with DDGS() as ddgs:
-            results = ddgs.images(
-                keywords=query,
-                max_results=num_results,
-                safesearch=safe_search,
-            )
-
-            for item in results:
-                images.append(ImageResult(
-                    url=item.get("image", ""),
-                    title=item.get("title", "No title"),
-                    source_url=item.get("url", ""),
-                    width=item.get("width", 0),
-                    height=item.get("height", 0),
-                ))
-
-        return images
+        return ImageSearchResult(
+            success=True,
+            query=query,
+            images=images,
+            total_results=len(images),
+        )
 
 
 # Global instance
