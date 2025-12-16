@@ -30,7 +30,8 @@ LANGUAGES = {
     "it": ("Italian", "🇮🇹"),
     "pt": ("Portuguese", "🇵🇹"),
     "ru": ("Russian", "🇷🇺"),
-    "zh-CN": ("Chinese", "🇨🇳"),
+    "zh-CN": ("Chinese (Simplified)", "🇨🇳"),
+    "zh-TW": ("Chinese (Traditional)", "🇹🇼"),
     "ja": ("Japanese", "🇯🇵"),
     "ko": ("Korean", "🇰🇷"),
     "tr": ("Turkish", "🇹🇷"),
@@ -66,6 +67,11 @@ LANGUAGE_ALIASES = {
     "portuguese": "pt",
     "russian": "ru",
     "chinese": "zh-CN",
+    "chinese simplified": "zh-CN",
+    "simplified chinese": "zh-CN",
+    "chinese traditional": "zh-TW",
+    "traditional chinese": "zh-TW",
+    "taiwanese": "zh-TW",
     "japanese": "ja",
     "korean": "ko",
     "turkish": "tr",
@@ -151,8 +157,14 @@ class TranslateService:
 
     def get_language_info(self, lang_code: str) -> tuple[str, str]:
         """Get language name and flag for a code."""
+        # Direct match
         if lang_code in LANGUAGES:
             return LANGUAGES[lang_code]
+        # Case-insensitive match
+        lang_lower = lang_code.lower()
+        for code, info in LANGUAGES.items():
+            if code.lower() == lang_lower:
+                return info
         # Handle unknown but valid codes
         return (lang_code.upper(), "🌐")
 
@@ -168,9 +180,11 @@ class TranslateService:
         """
         try:
             detected = detect(text)
-            # langdetect returns 'zh-cn' but we use 'zh-CN'
+            # langdetect returns lowercase codes, normalize them
             if detected == "zh-cn":
                 return "zh-CN"
+            if detected == "zh-tw":
+                return "zh-TW"
             return detected
         except LangDetectException:
             return None
