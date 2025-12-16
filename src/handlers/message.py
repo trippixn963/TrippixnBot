@@ -18,6 +18,7 @@ import time
 from src.core import config, log
 from src.services import ai_service, stats_store
 from src.services.downloader import downloader
+from src.services.translate_service import translate_service
 
 
 # Lanyard API URL for fetching real-time presence
@@ -547,6 +548,124 @@ async def _handle_reply_download(message: discord.Message) -> None:
 
 
 # =============================================================================
+# Reply Translate Handler
+# =============================================================================
+
+async def _handle_reply_translate(message: discord.Message, target_lang: str = "en") -> None:
+    """Handle replying 'translate' or 'tr' to a message."""
+    log.tree("Reply Translate Triggered", [
+        ("User", f"{message.author} ({message.author.id})"),
+        ("Channel", f"#{message.channel.name}" if hasattr(message.channel, 'name') else str(message.channel.id)),
+        ("Target Lang", target_lang),
+    ], emoji="🌐")
+
+    # Get the referenced message
+    ref = message.reference
+    if not ref or not ref.message_id:
+        log.warning("No message reference found")
+        return
+
+    try:
+        # Fetch the original message
+        original = await message.channel.fetch_message(ref.message_id)
+    except discord.NotFound:
+        await message.reply("Couldn't find that message.", mention_author=False)
+        return
+    except discord.Forbidden:
+        await message.reply("No permission to read that message.", mention_author=False)
+        return
+
+    # Get text to translate
+    text = original.content
+    if not text:
+        await message.reply("That message has no text content.", mention_author=False)
+        return
+
+    # Perform translation
+    result = await translate_service.translate(text, target_lang=target_lang)
+
+    if not result.success:
+        embed = discord.Embed(
+            title="❌ Translation Failed",
+            description=result.error or "An unknown error occurred.",
+            color=0xFF0000
+        )
+        await message.reply(embed=embed, mention_author=False)
+        return
+
+    # Get developer avatar for footer
+    developer_avatar = None
+    try:
+        developer = await message.guild.fetch_member(config.OWNER_ID)
+        developer_avatar = developer.avatar.url if developer and developer.avatar else None
+    except Exception:
+        pass
+
+    # Build success embed
+    embed = discord.Embed(
+        title=f"{result.source_flag} → {result.target_flag} Translation",
+        color=0x5865F2
+    )
+
+    # Original text (truncate if too long)
+    original_display = result.original_text
+    if len(original_display) > 1000:
+        original_display = original_display[:997] + "..."
+    embed.add_field(
+        name=f"Original ({result.source_name})",
+        value=original_display,
+        inline=False
+    )
+
+    # Translated text
+    translated_display = result.translated_text
+    if len(translated_display) > 1000:
+        translated_display = translated_display[:997] + "..."
+    embed.add_field(
+        name=f"Translation ({result.target_name})",
+        value=translated_display,
+        inline=False
+    )
+
+    embed.set_footer(text="Developed By: حَـــــنَّـــــا", icon_url=developer_avatar)
+
+    await message.reply(embed=embed, mention_author=False)
+
+    log.tree("Reply Translate Complete", [
+        ("From", f"{result.source_name} ({result.source_lang})"),
+        ("To", f"{result.target_name} ({result.target_lang})"),
+        ("User", str(message.author)),
+    ], emoji="✅")
+
+
+def _parse_translate_command(content: str) -> tuple[bool, str]:
+    """
+    Parse translate/tr command from message content.
+
+    Returns:
+        (is_translate_command, target_language)
+    """
+    content = content.lower().strip()
+
+    # "translate" or "tr" alone -> default to English
+    if content in ("translate", "tr"):
+        return (True, "en")
+
+    # "translate ar" or "tr arabic" etc.
+    parts = content.split(None, 1)
+    if len(parts) == 2 and parts[0] in ("translate", "tr"):
+        lang = parts[1].strip()
+        # Validate language
+        resolved = translate_service.resolve_language(lang)
+        if resolved:
+            return (True, resolved)
+        # Invalid language, still a translate command but return default
+        return (True, "en")
+
+    return (False, "")
+
+
+# =============================================================================
 # Message Handler
 # =============================================================================
 
@@ -559,9 +678,20 @@ async def on_message(bot: discord.Client, message: discord.Message) -> None:
     if message.author.bot:
         return
 
-    # Reply-to-download feature (anyone can use)
-    if message.content.lower().strip() == "download" and message.reference:
-        await _handle_reply_download(message)
+    # Check if message is a reply
+    if message.reference:
+        content = message.content.lower().strip()
+
+        # Reply-to-download feature
+        if content == "download":
+            await _handle_reply_download(message)
+            return
+
+        # Reply-to-translate feature
+        is_translate, target_lang = _parse_translate_command(message.content)
+        if is_translate:
+            await _handle_reply_translate(message, target_lang)
+            return
 
 
 # =============================================================================

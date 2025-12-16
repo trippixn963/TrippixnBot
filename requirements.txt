@@ -15,3 +15,7 @@ openai
 
 # Media Downloader
 yt-dlp
+
+# Translation
+deep-translator
+langdetect
