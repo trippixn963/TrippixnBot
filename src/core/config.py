@@ -61,6 +61,10 @@ class Config:
     # OpenAI settings
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 
+    # Google Custom Search API (for /image command)
+    GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
+    GOOGLE_CX: str = os.getenv("GOOGLE_CX", "")  # Custom Search Engine ID
+
     # Webhook for ping notifications
     PING_WEBHOOK_URL: str = os.getenv("TRIPPIXN_PING_WEBHOOK_URL", "")
 
