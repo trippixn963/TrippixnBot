@@ -1,0 +1,1 @@
+/Users/johnhamwi/Developer/TahaBot/scripts/log-sync-daemon.sh
