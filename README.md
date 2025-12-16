@@ -71,6 +71,16 @@ This bot was custom-built for **discord.gg/syria** and is provided as-is for edu
 | Command | Description |
 |---------|-------------|
 | `/download <url>` | Download media from Instagram, Twitter/X, or TikTok |
+| `/translate <text> [to]` | Translate text to another language (default: English) |
+| `/languages` | Show all supported languages |
+
+## Reply Commands
+
+| Reply With | Description |
+|------------|-------------|
+| `download` | Download media from a message containing a link |
+| `translate` or `tr` | Translate a message to English |
+| `tr ar` or `translate arabic` | Translate a message to a specific language |
 
 ---
 
@@ -83,13 +93,15 @@ src/
 │   ├── config.py           # Environment-based configuration
 │   └── logger.py           # Custom tree-style logging
 ├── commands/               # Slash commands
-│   └── download.py         # Media download command
+│   ├── download.py         # Media download command
+│   └── translate.py        # Translation command
 ├── handlers/               # Discord event handlers
 │   ├── message.py          # AI responder + reply download
 │   └── ready.py            # Bot startup and stats loop
 └── services/               # Business logic
     ├── ai_service.py       # OpenAI chat integration
     ├── downloader.py       # yt-dlp + FFmpeg media downloads
+    ├── translate_service.py # Google Translate integration
     └── stats_api.py        # HTTP stats API server
 ```
 
