@@ -2,7 +2,7 @@
 TrippixnBot - Message Handler
 =============================
 
-Handles AutoMod blocked messages - responds with AI when someone tries to ping developer.
+Handles messages and developer ping blocking (only when in DND mode).
 
 Author: حَـــــنَّـــــا
 """
@@ -10,16 +10,16 @@ Author: حَـــــنَّـــــا
 import asyncio
 import discord
 import aiohttp
-import re
 from datetime import datetime, timezone
 from collections import defaultdict
 import time
 
 from src.core import config, log
-from src.services import ai_service, stats_store
-from src.services.downloader import downloader
-from src.services.translate_service import translate_service
-from src.views.translate_view import TranslateView, create_translate_embed, send_translate_webhook
+from src.services import ai_service, stats_store, message_counter, server_intel, rag_service, auto_learner
+from src.services.bump_service import bump_service
+
+# Disboard bot ID
+DISBOARD_BOT_ID = 302050872383242240
 
 
 # Lanyard API URL for fetching real-time presence
@@ -28,6 +28,79 @@ LANYARD_API_URL = f"https://api.lanyard.rest/v1/users/{config.OWNER_ID}"
 
 # Track user pings: {user_id: [(timestamp, message), ...]}
 _ping_history: dict[int, list[tuple[float, str]]] = defaultdict(list)
+
+# AI response cooldown: {user_id: last_response_timestamp}
+_ai_cooldowns: dict[int, float] = {}
+AI_COOLDOWN_SECONDS = 3600  # 1 hour cooldown between AI responses per user
+
+# =============================================================================
+# Multi-Turn Conversation Tracking
+# =============================================================================
+
+# Conversation history: {user_id: {"messages": [...], "last_ai_message_id": int, "last_activity": float}}
+_conversations: dict[int, dict] = {}
+CONVERSATION_TIMEOUT = 900  # 15 minutes - conversations expire after this
+CONVERSATION_MAX_TURNS = 6  # Max exchanges to keep in context (3 user + 3 AI)
+FOLLOWUP_COOLDOWN = 30  # 30 second cooldown for follow-up messages (shorter than initial)
+
+
+def _get_conversation(user_id: int) -> dict | None:
+    """Get active conversation for user, or None if expired/doesn't exist."""
+    if user_id not in _conversations:
+        return None
+
+    conv = _conversations[user_id]
+    now = time.time()
+
+    # Check if conversation has expired
+    if now - conv.get("last_activity", 0) > CONVERSATION_TIMEOUT:
+        log.tree("Conversation Expired", [
+            ("User ID", str(user_id)),
+            ("Inactive For", f"{int((now - conv.get('last_activity', 0)) / 60)}m"),
+        ], emoji="⏰")
+        del _conversations[user_id]
+        return None
+
+    return conv
+
+
+def _add_to_conversation(user_id: int, role: str, content: str, message_id: int = None) -> None:
+    """Add a message to user's conversation history."""
+    now = time.time()
+
+    if user_id not in _conversations:
+        _conversations[user_id] = {
+            "messages": [],
+            "last_ai_message_id": None,
+            "last_activity": now,
+        }
+
+    conv = _conversations[user_id]
+    conv["messages"].append({"role": role, "content": content})
+    conv["last_activity"] = now
+
+    if role == "assistant" and message_id:
+        conv["last_ai_message_id"] = message_id
+
+    # Trim to max turns
+    if len(conv["messages"]) > CONVERSATION_MAX_TURNS:
+        conv["messages"] = conv["messages"][-CONVERSATION_MAX_TURNS:]
+
+    log.tree("Conversation Updated", [
+        ("User ID", str(user_id)),
+        ("Role", role),
+        ("Total Messages", str(len(conv["messages"]))),
+        ("Content Preview", content[:50] + "..." if len(content) > 50 else content),
+    ], emoji="💬")
+
+
+def _clear_conversation(user_id: int) -> None:
+    """Clear conversation history for a user."""
+    if user_id in _conversations:
+        del _conversations[user_id]
+        log.tree("Conversation Cleared", [
+            ("User ID", str(user_id)),
+        ], emoji="🗑️")
 
 
 def _get_ping_context(user_id: int, current_message: str) -> str:
@@ -149,577 +222,127 @@ async def _get_developer_activity_context() -> str:
 
 
 # =============================================================================
-# Reply Download Handler (Owner Only)
+# Conversation Reply Handler
 # =============================================================================
 
-# Platform styling (same as download command)
-PLATFORM_ICONS = {
-    "instagram": "📸",
-    "twitter": "🐦",
-    "tiktok": "🎵",
-    "unknown": "📥",
-}
+async def _handle_conversation_reply(bot: discord.Client, message: discord.Message) -> None:
+    """Handle replies to AI messages for multi-turn conversations."""
+    user_id = message.author.id
+    replied_to_id = message.reference.message_id
 
-PLATFORM_COLORS = {
-    "instagram": 0xE4405F,
-    "twitter": 0x1DA1F2,
-    "tiktok": 0x000000,
-    "unknown": 0x5865F2,
-}
+    # Check if user has an active conversation
+    conv = _get_conversation(user_id)
+    if not conv:
+        return  # No active conversation
 
+    # Check if reply is to the bot's last AI message
+    if conv.get("last_ai_message_id") != replied_to_id:
+        return  # Not replying to our message
 
-async def _send_download_webhook(
-    success: bool,
-    user: discord.User,
-    platform: str,
-    url: str,
-    channel_name: str,
-    guild_name: str,
-    file_count: int = 0,
-    total_size: int = 0,
-    total_duration: float = 0,
-    media_jump_url: str = None,
-    error: str = None,
-) -> None:
-    """Send download log to webhook."""
-    if not config.DOWNLOAD_WEBHOOK_URL:
-        return
+    # Check follow-up cooldown (shorter than initial)
+    now = time.time()
+    last_response = _ai_cooldowns.get(user_id, 0)
+    time_since_last = now - last_response
 
-    try:
-        icon = PLATFORM_ICONS.get(platform, "📥")
-        color = 0x00FF00 if success else 0xFF0000
-        status_text = "✅ Success" if success else "❌ Failed"
-
-        embed = {
-            "title": f"{icon} Download {'Completed' if success else 'Failed'}",
-            "color": color,
-            "fields": [
-                {
-                    "name": "Status",
-                    "value": status_text,
-                    "inline": True,
-                },
-                {
-                    "name": "Platform",
-                    "value": platform.title(),
-                    "inline": True,
-                },
-                {
-                    "name": "Requested By",
-                    "value": f"**{user.display_name}** (`{user.id}`)",
-                    "inline": True,
-                },
-                {
-                    "name": "Server",
-                    "value": guild_name,
-                    "inline": True,
-                },
-                {
-                    "name": "Channel",
-                    "value": f"#{channel_name}",
-                    "inline": True,
-                },
-                {
-                    "name": "Source",
-                    "value": f"[Original Link]({url})",
-                    "inline": True,
-                },
-            ],
-            "thumbnail": {"url": user.display_avatar.url} if user.display_avatar else None,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "footer": {"text": "TrippixnBot Download Logs"},
-        }
-
-        # Add media info if successful
-        if success:
-            if file_count > 0:
-                embed["fields"].append({
-                    "name": "Files",
-                    "value": str(file_count),
-                    "inline": True,
-                })
-            if total_size > 0:
-                embed["fields"].append({
-                    "name": "Size",
-                    "value": downloader.format_size(total_size),
-                    "inline": True,
-                })
-            if total_duration > 0:
-                embed["fields"].append({
-                    "name": "Duration",
-                    "value": downloader.format_duration(total_duration),
-                    "inline": True,
-                })
-            if media_jump_url:
-                embed["fields"].append({
-                    "name": "View Media",
-                    "value": f"[Jump to Message]({media_jump_url})",
-                    "inline": False,
-                })
-
-        # Add error if failed
-        if not success and error:
-            embed["fields"].append({
-                "name": "Error",
-                "value": error[:1000],
-                "inline": False,
-            })
-
-        # Remove None thumbnail
-        if not embed.get("thumbnail", {}).get("url"):
-            embed.pop("thumbnail", None)
-
-        async with aiohttp.ClientSession() as session:
-            payload = {"embeds": [embed]}
-            async with session.post(config.DOWNLOAD_WEBHOOK_URL, json=payload) as resp:
-                if resp.status in (200, 204):
-                    log.info("Download webhook sent")
-                else:
-                    log.warning(f"Download webhook returned status {resp.status}")
-
-    except Exception as e:
-        log.error("Failed to send download webhook", [
-            ("Error", type(e).__name__),
-            ("Message", str(e)),
-        ])
-
-
-async def _handle_reply_download(message: discord.Message) -> None:
-    """Handle replying 'download' to a message with a link."""
-    log.tree("Reply Download Triggered", [
-        ("User", f"{message.author} ({message.author.id})"),
-        ("Channel", f"#{message.channel.name}" if hasattr(message.channel, 'name') else str(message.channel.id)),
-        ("Message ID", message.id),
-    ], emoji="📥")
-
-    # Get the referenced message
-    ref = message.reference
-    if not ref or not ref.message_id:
-        log.warning("No message reference found")
-        return
-
-    log.info(f"Fetching referenced message {ref.message_id}")
-
-    try:
-        # Fetch the original message
-        original = await message.channel.fetch_message(ref.message_id)
-        log.tree("Original Message Found", [
-            ("Author", f"{original.author} ({original.author.id})"),
-            ("Content Length", len(original.content) if original.content else 0),
-        ], emoji="📄")
-    except discord.NotFound:
-        log.warning(f"Referenced message {ref.message_id} not found")
-        await message.reply("Couldn't find that message.", mention_author=False)
-        return
-    except discord.Forbidden:
-        log.warning(f"No permission to read message {ref.message_id}")
-        await message.reply("No permission to read that message.", mention_author=False)
-        return
-
-    # Extract URL from the original message
-    content = original.content
-    if not content:
-        log.warning("Original message has no text content")
-        await message.reply("That message has no text content.", mention_author=False)
-        return
-
-    # Find URLs in the message
-    url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
-    urls = re.findall(url_pattern, content)
-    log.info(f"Found {len(urls)} URL(s) in message")
-
-    if not urls:
-        log.warning("No URLs found in message")
-        await message.reply("No URL found in that message.", mention_author=False)
-        return
-
-    # Find first supported URL
-    supported_url = None
-    platform = None
-    for url in urls:
-        detected_platform = downloader.get_platform(url)
-        log.info(f"URL: {url[:50]}... -> Platform: {detected_platform or 'unsupported'}")
-        if detected_platform:
-            platform = detected_platform
-            supported_url = url
-            break
-
-    if not supported_url:
-        log.warning("No supported platform URL found")
-        await message.reply("No supported URL found (Instagram, Twitter/X, TikTok).", mention_author=False)
-        return
-
-    log.tree("Starting Download", [
-        ("Platform", platform.title()),
-        ("URL", supported_url[:60] + "..." if len(supported_url) > 60 else supported_url),
-        ("Requested By", str(message.author)),
-    ], emoji="⬇️")
-
-    # Send status message
-    icon = PLATFORM_ICONS.get(platform, "📥")
-    status_embed = discord.Embed(
-        title=f"{icon} Downloading from {platform.title()}...",
-        description="Please wait, this may take a moment.",
-        color=PLATFORM_COLORS.get(platform, 0x5865F2)
-    )
-    status_msg = await message.reply(embed=status_embed, mention_author=False)
-    log.info(f"Status message sent: {status_msg.id}")
-
-    # Download
-    log.info("Calling downloader service...")
-    result = await downloader.download(supported_url)
-
-    # Get channel/guild info for webhook
-    channel_name = message.channel.name if hasattr(message.channel, 'name') else str(message.channel.id)
-    guild_name = message.guild.name if message.guild else "DM"
-
-    if not result.success:
-        log.error("Download Failed", [
-            ("Platform", platform.title()),
-            ("Error", result.error or "Unknown error"),
-        ])
-        error_embed = discord.Embed(
-            title="❌ Download Failed",
-            description=result.error or "An unknown error occurred.",
-            color=0xFF0000
-        )
-        await status_msg.edit(embed=error_embed)
-
-        # Send failure webhook
-        await _send_download_webhook(
-            success=False,
-            user=message.author,
-            platform=platform,
-            url=supported_url,
-            channel_name=channel_name,
-            guild_name=guild_name,
-            error=result.error,
-        )
-        return
-
-    log.tree("Download Successful", [
-        ("Files", len(result.files)),
-        ("Platform", platform.title()),
-    ], emoji="✅")
-
-    # Upload files
-    upload_success = False
-    try:
-        files = []
-        total_size = 0
-        total_duration = 0.0
-
-        for file_path in result.files:
-            file_size = file_path.stat().st_size
-            total_size += file_size
-
-            # Get duration for videos
-            duration = await downloader.get_video_duration(file_path)
-            if duration:
-                total_duration += duration
-
-            log.tree("Preparing File", [
-                ("File", file_path.name),
-                ("Size", downloader.format_size(file_size)),
-                ("Duration", downloader.format_duration(duration) if duration else "N/A"),
-            ], emoji="📤")
-
-            discord_file = discord.File(file_path, filename=file_path.name)
-            files.append(discord_file)
-
-        # Get developer avatar for footer
-        developer_avatar = None
+    if time_since_last < FOLLOWUP_COOLDOWN:
+        remaining = int(FOLLOWUP_COOLDOWN - time_since_last)
+        log.tree("Follow-up Cooldown", [
+            ("User", f"{message.author.name} ({message.author.display_name})"),
+            ("User ID", str(user_id)),
+            ("Remaining", f"{remaining}s"),
+        ], emoji="⏳")
         try:
-            developer = await message.guild.fetch_member(config.OWNER_ID)
-            developer_avatar = developer.avatar.url if developer and developer.avatar else None
+            await message.reply(f"Slow down, wait {remaining}s before replying again.", delete_after=5)
         except Exception:
             pass
+        return
 
-        # Success embed
-        success_embed = discord.Embed(
-            title=f"{icon} Downloaded from {platform.title()}",
-            color=PLATFORM_COLORS.get(platform, 0x5865F2)
-        )
-        success_embed.add_field(
-            name="Requested By",
-            value=f"<@{message.author.id}>",
-            inline=True
-        )
-        success_embed.add_field(
-            name="Size",
-            value=downloader.format_size(total_size),
-            inline=True
-        )
-        if total_duration > 0:
-            success_embed.add_field(
-                name="Duration",
-                value=downloader.format_duration(total_duration),
-                inline=True
+    content = message.content.strip()
+    if not content:
+        return  # Empty message
+
+    user_name = message.author.display_name
+
+    log.tree("Conversation Reply Detected", [
+        ("User", f"{message.author.name} ({message.author.display_name})"),
+        ("User ID", str(user_id)),
+        ("Content", content[:50] + "..." if len(content) > 50 else content),
+        ("Conversation Turns", str(len(conv["messages"]))),
+    ], emoji="💬")
+
+    # Check if AI service is available
+    if not ai_service.is_available:
+        log.tree("AI Unavailable", [
+            ("User ID", str(user_id)),
+            ("Reason", "Service not configured"),
+        ], emoji="⚠️")
+        return
+
+    # Get developer's current activities for context
+    dev_activities = await _get_developer_activity_context()
+
+    # Get RAG context (semantic search)
+    rag_context = ""
+    if rag_service.is_available:
+        rag_context = rag_service.build_context(content, max_tokens=1500)
+
+    # Fallback to basic server context if RAG not available
+    if not rag_context:
+        rag_context = server_intel.get_server_context()
+
+    # Generate AI response with conversation history
+    try:
+        async with message.channel.typing():
+            response = await ai_service.chat(
+                message=content,
+                user_name=user_name,
+                dev_activity=dev_activities,
+                conversation_history=conv["messages"],
+                server_context=rag_context,
             )
-        success_embed.set_footer(text="Developed By: حَـــــنَّـــــا", icon_url=developer_avatar)
 
-        # Send the media as a new message (so it stays when we delete others)
-        log.info("Uploading media to Discord...")
-        media_msg = await message.channel.send(embed=success_embed, files=files)
-        log.info(f"Media uploaded successfully: {media_msg.id}")
-        upload_success = True
+        if response:
+            if len(response) > 2000:
+                response = response[:1997] + "..."
+                log.tree("Response Truncated", [
+                    ("User ID", str(user_id)),
+                ], emoji="✂️")
 
-        log.tree("Upload Complete", [
-            ("Files", len(files)),
-            ("Total Size", downloader.format_size(total_size)),
-            ("Duration", downloader.format_duration(total_duration) if total_duration > 0 else "N/A"),
-            ("Media Message ID", media_msg.id),
-        ], emoji="✅")
+            sent_message = await message.reply(response)
 
-        # Send success webhook with jump link to media
-        await _send_download_webhook(
-            success=True,
-            user=message.author,
-            platform=platform,
-            url=supported_url,
-            channel_name=channel_name,
-            guild_name=guild_name,
-            file_count=len(result.files),
-            total_size=total_size,
-            total_duration=total_duration,
-            media_jump_url=media_msg.jump_url,
-        )
+            # Update cooldown
+            _ai_cooldowns[user_id] = time.time()
 
-        # Clean up: Delete status message, download reply, and original message
-        log.info("Cleaning up messages...")
+            # Add to conversation history
+            _add_to_conversation(user_id, "user", content)
+            _add_to_conversation(user_id, "assistant", response, sent_message.id)
 
-        # Delete status message (the "Downloading..." message)
-        try:
-            await status_msg.delete()
-            log.info(f"Deleted status message: {status_msg.id}")
-        except discord.HTTPException as e:
-            log.warning(f"Failed to delete status message: {e}")
+            log.tree("Conversation Reply Sent", [
+                ("User", f"{message.author.name} ({message.author.display_name})"),
+                ("User ID", str(user_id)),
+                ("Response Length", str(len(response))),
+                ("Total Turns", str(len(conv["messages"]) + 2)),
+            ], emoji="✅")
+        else:
+            log.tree("AI Empty Response", [
+                ("User ID", str(user_id)),
+            ], emoji="⚠️")
 
-        # Delete the "download" reply message
-        try:
-            await message.delete()
-            log.info(f"Deleted download reply: {message.id}")
-        except discord.HTTPException as e:
-            log.warning(f"Failed to delete download reply: {e}")
-
-        # Delete the original message with the link
-        try:
-            await original.delete()
-            log.info(f"Deleted original message: {original.id}")
-        except discord.HTTPException as e:
-            log.warning(f"Failed to delete original message: {e}")
-
-        log.tree("Reply Download Complete", [
-            ("Platform", platform.title()),
-            ("Files", len(result.files)),
-            ("Requested By", str(message.author)),
-            ("Messages Cleaned", "Yes"),
-        ], emoji="🎉")
-
+    except discord.Forbidden as e:
+        log.tree("Reply Permission Error", [
+            ("User ID", str(user_id)),
+            ("Error", str(e)[:50]),
+        ], emoji="❌")
     except discord.HTTPException as e:
-        log.error("Upload Failed", [
-            ("Error Type", type(e).__name__),
-            ("Status", getattr(e, 'status', 'N/A')),
-            ("Message", str(e)),
+        log.tree("Reply HTTP Error", [
+            ("User ID", str(user_id)),
+            ("Status", str(e.status)),
+            ("Error", str(e)[:50]),
+        ], emoji="❌")
+    except Exception as e:
+        log.error_tree("Conversation Reply Failed", e, [
+            ("User ID", str(user_id)),
         ])
-        error_embed = discord.Embed(
-            title="❌ Upload Failed",
-            description="The file couldn't be uploaded to Discord. It may be too large.",
-            color=0xFF0000
-        )
-        await status_msg.edit(embed=error_embed)
-
-        # Send upload failure webhook
-        await _send_download_webhook(
-            success=False,
-            user=message.author,
-            platform=platform,
-            url=supported_url,
-            channel_name=channel_name,
-            guild_name=guild_name,
-            error=f"Upload failed: {str(e)}",
-        )
-
-    finally:
-        # Cleanup downloaded files
-        if result.files:
-            download_dir = result.files[0].parent
-            downloader.cleanup([download_dir])
-            log.info(f"Cleaned up temp directory: {download_dir}")
-
-
-# =============================================================================
-# Reply Translate Handler
-# =============================================================================
-
-async def _handle_reply_translate(message: discord.Message, target_lang: str = "en") -> None:
-    """Handle replying 'translate' or 'tr' to a message."""
-    log.tree("Reply Translate Triggered", [
-        ("User", f"{message.author} ({message.author.id})"),
-        ("Channel", f"#{message.channel.name}" if hasattr(message.channel, 'name') else str(message.channel.id)),
-        ("Target Lang", target_lang),
-    ], emoji="🌐")
-
-    # Get channel/guild info for webhook
-    channel_name = message.channel.name if hasattr(message.channel, 'name') else str(message.channel.id)
-    guild_name = message.guild.name if message.guild else "DM"
-
-    # Get the referenced message
-    ref = message.reference
-    if not ref or not ref.message_id:
-        log.warning("No message reference found")
-        return
-
-    try:
-        # Fetch the original message
-        original = await message.channel.fetch_message(ref.message_id)
-    except discord.NotFound:
-        await message.reply("Couldn't find that message.", mention_author=False)
-        return
-    except discord.Forbidden:
-        await message.reply("No permission to read that message.", mention_author=False)
-        return
-
-    # Get text to translate
-    text = original.content
-    if not text:
-        await message.reply("That message has no text content.", mention_author=False)
-        return
-
-    # Perform translation
-    result = await translate_service.translate(text, target_lang=target_lang)
-
-    if not result.success:
-        embed = discord.Embed(
-            title="❌ Translation Failed",
-            description=result.error or "An unknown error occurred.",
-            color=0xFF0000
-        )
-        await message.reply(embed=embed, mention_author=False)
-
-        # Send failure webhook
-        await send_translate_webhook(
-            success=False,
-            user=message.author,
-            source_type="reply",
-            source_lang="unknown",
-            target_lang=target_lang,
-            source_name="Unknown",
-            target_name=target_lang,
-            source_flag="🌐",
-            target_flag="🌐",
-            original_text=text,
-            translated_text="",
-            channel_name=channel_name,
-            guild_name=guild_name,
-            error=result.error,
-        )
-        return
-
-    # Check if already in target language
-    if result.source_lang == result.target_lang:
-        embed = discord.Embed(
-            title="🌐 Already in Target Language",
-            description=f"This text is already in {result.target_name}.",
-            color=0xFFA500
-        )
-        await message.reply(embed=embed, mention_author=False)
-        return
-
-    # Get developer avatar for footer
-    developer_avatar = None
-    try:
-        developer = await message.guild.fetch_member(config.OWNER_ID)
-        developer_avatar = developer.avatar.url if developer and developer.avatar else None
-    except Exception:
-        pass
-
-    # Build embed with code blocks
-    embed = create_translate_embed(result, developer_avatar)
-
-    # Create interactive view (only requester can use buttons)
-    view = TranslateView(
-        original_text=text,
-        requester_id=message.author.id,
-        current_lang=result.target_lang,
-        source_lang=result.source_lang,
-    )
-
-    reply_msg = await message.reply(embed=embed, view=view, mention_author=False)
-
-    log.tree("Reply Translate Complete", [
-        ("From", f"{result.source_name} ({result.source_lang})"),
-        ("To", f"{result.target_name} ({result.target_lang})"),
-        ("User", str(message.author)),
-    ], emoji="✅")
-
-    # Send success webhook
-    await send_translate_webhook(
-        success=True,
-        user=message.author,
-        source_type="reply",
-        source_lang=result.source_lang,
-        target_lang=result.target_lang,
-        source_name=result.source_name,
-        target_name=result.target_name,
-        source_flag=result.source_flag,
-        target_flag=result.target_flag,
-        original_text=result.original_text,
-        translated_text=result.translated_text,
-        channel_name=channel_name,
-        guild_name=guild_name,
-        message_jump_url=reply_msg.jump_url,
-    )
-
-
-def _parse_translate_command(content: str) -> tuple[bool, str]:
-    """
-    Parse translate/tr command from message content.
-
-    Supported formats:
-    - "translate" or "tr" -> English (default)
-    - "translate ar" or "tr arabic" -> Arabic
-    - "translate to arabic" or "tr to ar" -> Arabic
-    - "translate to english" or "tr to en" -> English
-
-    Returns:
-        (is_translate_command, target_language)
-    """
-    content = content.lower().strip()
-
-    # "translate" or "tr" alone -> default to English
-    if content in ("translate", "tr"):
-        return (True, "en")
-
-    # Split into parts
-    parts = content.split()
-
-    # Must start with translate or tr
-    if not parts or parts[0] not in ("translate", "tr"):
-        return (False, "")
-
-    # Handle different formats
-    if len(parts) == 2:
-        # "translate ar" or "tr arabic"
-        lang = parts[1]
-        resolved = translate_service.resolve_language(lang)
-        if resolved:
-            return (True, resolved)
-        # Invalid language, default to English
-        return (True, "en")
-
-    elif len(parts) >= 3 and parts[1] == "to":
-        # "translate to arabic" or "tr to en"
-        # Join everything after "to" in case of multi-word language names
-        lang = " ".join(parts[2:])
-        resolved = translate_service.resolve_language(lang)
-        if resolved:
-            return (True, resolved)
-        # Invalid language, default to English
-        return (True, "en")
-
-    # If we got here with translate/tr prefix, treat as translate command
-    return (True, "en")
 
 
 # =============================================================================
@@ -730,25 +353,38 @@ async def on_message(bot: discord.Client, message: discord.Message) -> None:
     """
     Handle incoming messages.
 
-    Developer pings are blocked by AutoMod before reaching here.
+    Developer pings are blocked by AutoMod when in DND mode.
+    Detects replies to AI responses for multi-turn conversations.
     """
+    # Check for Disboard bump confirmation (before skipping bots)
+    if message.author.id == DISBOARD_BOT_ID:
+        # Disboard sends an embed with "Bump done!" when successful
+        if message.embeds:
+            for embed in message.embeds:
+                desc = (embed.description or "").lower()
+
+                if "bump done" in desc:
+                    # Record the bump - triggers 2 hour cooldown
+                    bump_service.record_bump()
+                    break
+        return
+
     if message.author.bot:
         return
 
-    # Check if message is a reply
-    if message.reference:
-        content = message.content.lower().strip()
+    # Increment weekly message counter (only for guild messages)
+    if message.guild and message.guild.id == config.GUILD_ID:
+        await message_counter.increment()
 
-        # Reply-to-download feature
-        if content == "download":
-            await _handle_reply_download(message)
-            return
+        # Record message for server intelligence
+        server_intel.record_message(message)
 
-        # Reply-to-translate feature
-        is_translate, target_lang = _parse_translate_command(message.content)
-        if is_translate:
-            await _handle_reply_translate(message, target_lang)
-            return
+        # Auto-learn from message (indexes + extracts FAQs from Q&A patterns)
+        await auto_learner.learn_from_message(message)
+
+    # Check for reply to AI response (multi-turn conversation)
+    if message.reference and message.reference.message_id:
+        await _handle_conversation_reply(bot, message)
 
 
 # =============================================================================
@@ -759,18 +395,8 @@ async def on_automod_action(bot: discord.Client, execution: discord.AutoModActio
     """
     Handle AutoMod actions - respond with AI when developer ping is blocked.
     """
-    log.tree("AutoMod Action Received", [
-        ("Rule ID", execution.rule_id),
-        ("Trigger Type", execution.rule_trigger_type.name if execution.rule_trigger_type else "Unknown"),
-        ("Action Type", execution.action.type.name if execution.action else "Unknown"),
-        ("User ID", execution.user_id),
-        ("Channel ID", execution.channel_id),
-        ("Content", (execution.content[:50] + "...") if execution.content and len(execution.content) > 50 else execution.content),
-    ], emoji="📥")
-
     # Only respond to keyword triggers (our developer ping rule)
     if execution.rule_trigger_type != discord.AutoModRuleTriggerType.keyword:
-        log.info(f"Ignoring AutoMod action - not keyword trigger (was {execution.rule_trigger_type})")
         return
 
     # Get the blocked content
@@ -779,11 +405,10 @@ async def on_automod_action(bot: discord.Client, execution: discord.AutoModActio
     # Check if it contains developer mention
     dev_mentions = [f"<@{config.OWNER_ID}>", f"<@!{config.OWNER_ID}>"]
     if not any(mention in content for mention in dev_mentions):
-        log.info(f"Ignoring AutoMod action - no developer mention in content")
         return
 
     log.tree("Developer Ping Intercepted", [
-        ("Original Content", content),
+        ("Original Content", content[:50] + "..." if len(content) > 50 else content),
     ], emoji="🎯")
 
     # Get channel
@@ -792,29 +417,45 @@ async def on_automod_action(bot: discord.Client, execution: discord.AutoModActio
         log.warning(f"Could not find channel {execution.channel_id}")
         return
 
-    log.tree("Channel Found", [
-        ("Channel", f"#{channel.name}" if hasattr(channel, 'name') else str(channel)),
-        ("Channel ID", execution.channel_id),
-    ], emoji="📍")
-
     user_id = execution.user_id
     member = execution.member
 
+    # Check cooldown - 1 hour between AI responses per user
+    now = time.time()
+    last_response = _ai_cooldowns.get(user_id, 0)
+    time_since_last = now - last_response
+
+    if time_since_last < AI_COOLDOWN_SECONDS:
+        remaining = int(AI_COOLDOWN_SECONDS - time_since_last)
+        remaining_mins = remaining // 60
+        remaining_secs = remaining % 60
+
+        log.info(f"User {user_id} on cooldown - {remaining_mins}m {remaining_secs}s remaining")
+
+        try:
+            if remaining_mins > 0:
+                await channel.send(f"<@{user_id}> Chill, you can ping me again in {remaining_mins}m {remaining_secs}s")
+            else:
+                await channel.send(f"<@{user_id}> Chill, you can ping me again in {remaining_secs}s")
+        except Exception:
+            pass
+        return
+
     # Remove developer mention from content
+    cleaned_content = content
     for mention in dev_mentions:
-        content = content.replace(mention, "").strip()
+        cleaned_content = cleaned_content.replace(mention, "").strip()
 
     # Default message if empty
-    if not content:
-        content = "Hello!"
+    if not cleaned_content:
+        cleaned_content = "Hello!"
 
     user_name = member.display_name if member else "User"
 
     log.tree("Processing Developer Ping", [
         ("User", user_name),
         ("User ID", user_id),
-        ("Cleaned Content", content[:100] + "..." if len(content) > 100 else content),
-        ("Has Member", "Yes" if member else "No"),
+        ("Cleaned Content", cleaned_content[:100] + "..." if len(cleaned_content) > 100 else cleaned_content),
     ], emoji="🛡️")
 
     # Check if AI service is available
@@ -822,7 +463,6 @@ async def on_automod_action(bot: discord.Client, execution: discord.AutoModActio
         log.warning("AI service not available - cannot respond")
         try:
             await channel.send(f"<@{user_id}> AI service is not available.")
-            log.info("Sent AI unavailable message")
         except Exception as e:
             log.error("Failed to send AI unavailable message", [
                 ("Error", type(e).__name__),
@@ -830,38 +470,63 @@ async def on_automod_action(bot: discord.Client, execution: discord.AutoModActio
             ])
         return
 
-    # Store original blocked message for footer display
-    original_blocked = execution.content or ""
-
     # Get developer's current activities for context
     dev_activities = await _get_developer_activity_context()
 
     # Get ping history context
-    ping_context = _get_ping_context(user_id, content)
+    ping_context = _get_ping_context(user_id, cleaned_content)
+
+    # Get RAG context (semantic search) - this replaces the old server_intel approach
+    rag_context = ""
+    if rag_service.is_available:
+        rag_context = rag_service.build_context(cleaned_content, max_tokens=1500)
+
+    # Fallback to basic server context if RAG not available
+    server_context = ""
+    if not rag_context:
+        server_context = server_intel.get_server_context()
 
     log.tree("Generating AI Response", [
-        ("Original Blocked", original_blocked[:80] + "..." if len(original_blocked) > 80 else original_blocked),
+        ("Original Message", content[:80] + "..." if len(content) > 80 else content),
         ("Dev Activity", dev_activities if dev_activities else "None"),
         ("Ping Context", ping_context if ping_context else "First ping"),
+        ("RAG Context", "Yes" if rag_context else "No"),
+        ("Fallback Context", "Yes" if server_context else "No"),
     ], emoji="🤖")
+
+    # Get existing conversation history (for multi-turn)
+    conv = _get_conversation(user_id)
+    conversation_history = conv["messages"] if conv else None
 
     # Generate AI response
     try:
         async with channel.typing():
             response = await ai_service.chat(
-                message=content,
+                message=cleaned_content,
                 user_name=user_name,
-                original_blocked=original_blocked,
+                original_blocked=content,
                 dev_activity=dev_activities,
                 ping_context=ping_context,
+                conversation_history=conversation_history,
+                server_context=rag_context or server_context,  # RAG context preferred
             )
 
         if response:
             if len(response) > 2000:
                 response = response[:1997] + "..."
-                log.info("Response truncated to 2000 chars")
+                log.tree("Response Truncated", [
+                    ("User ID", str(user_id)),
+                    ("Original Length", str(len(response))),
+                ], emoji="✂️")
 
             sent_message = await channel.send(f"<@{user_id}> {response}")
+
+            # Update cooldown after successful response
+            _ai_cooldowns[user_id] = time.time()
+
+            # Store in conversation history for multi-turn
+            _add_to_conversation(user_id, "user", cleaned_content)
+            _add_to_conversation(user_id, "assistant", response, sent_message.id)
 
             log.tree("AI Response Sent", [
                 ("To User", user_name),
@@ -878,7 +543,7 @@ async def on_automod_action(bot: discord.Client, execution: discord.AutoModActio
                 user_name=user_name,
                 user_id=user_id,
                 user_avatar=user_avatar,
-                original_message=content,
+                original_message=cleaned_content,
                 ai_response=response,
                 channel_name=channel_name,
                 channel_id=execution.channel_id,

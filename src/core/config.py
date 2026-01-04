@@ -9,7 +9,7 @@ Author: حَـــــنَّـــــا
 """
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -61,6 +61,9 @@ class Config:
     # OpenAI settings
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 
+    # OpenWeatherMap API
+    OPENWEATHER_API_KEY: str = os.getenv("OPENWEATHER_API_KEY", "")
+
     # Google Custom Search API (for /image command)
     GOOGLE_API_KEY: str = os.getenv("GOOGLE_API_KEY", "")
     GOOGLE_CX: str = os.getenv("GOOGLE_CX", "")  # Custom Search Engine ID
@@ -69,10 +72,16 @@ class Config:
     PING_WEBHOOK_URL: str = os.getenv("TRIPPIXN_PING_WEBHOOK_URL", "")
 
     # Webhook for download logs
-    DOWNLOAD_WEBHOOK_URL: str = os.getenv("TRIPPIXN_DOWNLOAD_WEBHOOK_URL", "https://discord.com/api/webhooks/1450308521102016533/EoWkJ-8iHpPMTGxLGaY5fF18LqRSGZorx9wREyAzHw_n_tgZd3VZbW3mq4RKp6qCW1T6")
+    DOWNLOAD_WEBHOOK_URL: str = os.getenv("TRIPPIXN_DOWNLOAD_WEBHOOK_URL", "")
 
     # Webhook for translation logs
-    TRANSLATE_WEBHOOK_URL: str = os.getenv("TRIPPIXN_TRANSLATE_WEBHOOK_URL", "https://discord.com/api/webhooks/1450318110828789772/nU5no9SBg0KRtsxzzjXSe9fKofI3v_PwRmyens3oRKVjvhazhAkP1f1XFWX6QslV505o")
+    TRANSLATE_WEBHOOK_URL: str = os.getenv("TRIPPIXN_TRANSLATE_WEBHOOK_URL", "")
+
+    # Webhook for image search logs
+    IMAGE_WEBHOOK_URL: str = os.getenv("TRIPPIXN_IMAGE_WEBHOOK_URL", "")
+
+    # Webhook for convert logs
+    CONVERT_WEBHOOK_URL: str = os.getenv("TRIPPIXN_CONVERT_WEBHOOK_URL", "")
 
     # Timing settings (seconds)
     STATS_UPDATE_INTERVAL: int = _get_env_int("TRIPPIXN_STATS_INTERVAL", 60)
@@ -80,6 +89,16 @@ class Config:
 
     # AutoMod
     AUTOMOD_RULE_NAME: str = os.getenv("TRIPPIXN_AUTOMOD_RULE_NAME", "Block Developer Pings")
+
+    # Role that can ping even when blocking is enabled
+    PING_ALLOWED_ROLE_ID: int = 1387043924157272256
+
+    # Moderator role for dashboard display
+    MODERATOR_ROLE_ID: int = 1387043924157272256
+
+    # Bump reminder settings
+    BUMP_CHANNEL_ID: int = _get_env_int("TRIPPIXN_BUMP_CHANNEL_ID", 0)
+    BUMP_ROLE_ID: int = _get_env_int("TRIPPIXN_BUMP_ROLE_ID", 0)
 
 
 config = Config()

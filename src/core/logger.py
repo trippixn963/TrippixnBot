@@ -26,16 +26,19 @@ Log Structure:
 Author: حَـــــنَّـــــا
 """
 
+import atexit
 import os
 import re
 import shutil
+import threading
 import uuid
 import asyncio
 import traceback
 import aiohttp
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import List, Tuple, Optional, Any, Dict
+from typing import List, Tuple, Optional, Any, Dict, Generator
 from zoneinfo import ZoneInfo
 
 
@@ -48,6 +51,9 @@ _NY_TZ = ZoneInfo("America/New_York")
 
 # Log retention period in days
 LOG_RETENTION_DAYS = 7
+
+# Max log file size before rotation (10MB)
+MAX_LOG_SIZE_BYTES = 10 * 1024 * 1024
 
 # Error webhook colors
 COLOR_ERROR = 0xFF0000      # Red
@@ -70,6 +76,22 @@ EMOJI_PATTERN = re.compile(
     "]+",
     flags=re.UNICODE
 )
+
+# Patterns that look like secrets - compiled for performance
+SECRET_PATTERNS = [
+    # Tokens and API keys
+    (re.compile(r"(token[\"\']?\s*[:=]\s*[\"\']?)([a-zA-Z0-9_.-]{20,})", re.IGNORECASE), r"\1***REDACTED***"),
+    (re.compile(r"(api[_-]?key[\"\']?\s*[:=]\s*[\"\']?)([a-zA-Z0-9_.-]{20,})", re.IGNORECASE), r"\1***REDACTED***"),
+    (re.compile(r"(secret[\"\']?\s*[:=]\s*[\"\']?)([a-zA-Z0-9_.-]{20,})", re.IGNORECASE), r"\1***REDACTED***"),
+    # Passwords
+    (re.compile(r"(password[\"\']?\s*[:=]\s*[\"\']?)([^\s\"\']+)", re.IGNORECASE), r"\1***REDACTED***"),
+    # Discord webhooks
+    (re.compile(r"(webhook[s]?/\d+/)([a-zA-Z0-9_-]+)", re.IGNORECASE), r"\1***REDACTED***"),
+    # Bearer tokens
+    (re.compile(r"(Bearer\s+)([a-zA-Z0-9_.-]+)", re.IGNORECASE), r"\1***REDACTED***"),
+    # Discord bot tokens (specific format)
+    (re.compile(r"([A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,})"), r"***DISCORD_TOKEN_REDACTED***"),
+]
 
 
 # =============================================================================
@@ -101,6 +123,12 @@ class MiniTreeLogger:
         """Initialize the logger with unique run ID and daily log folder rotation."""
         self.run_id: str = str(uuid.uuid4())[:8]
 
+        # Thread lock for file operations
+        self._lock = threading.Lock()
+
+        # Context stack for nested logging
+        self._context_stack: List[str] = []
+
         # Base logs directory
         self.logs_base_dir = Path(__file__).parent.parent.parent / "logs"
         self.logs_base_dir.mkdir(exist_ok=True)
@@ -125,9 +153,53 @@ class MiniTreeLogger:
         # Write session header
         self._write_session_header()
 
+        # Register shutdown handler
+        atexit.register(self._shutdown)
+
     # =========================================================================
     # Private Methods - Setup
     # =========================================================================
+
+    def _shutdown(self) -> None:
+        """Clean shutdown - write final log entry."""
+        try:
+            with self._lock:
+                shutdown_msg = (
+                    f"\n{'='*60}\n"
+                    f"SESSION END - RUN ID: {self.run_id}\n"
+                    f"{self._get_timestamp()}\n"
+                    f"{'='*60}\n\n"
+                )
+                with open(self.log_file, "a", encoding="utf-8") as f:
+                    f.write(shutdown_msg)
+        except Exception:
+            pass
+
+    def _check_log_size_rotation(self, file_path: Path) -> None:
+        """Rotate log file if it exceeds max size."""
+        try:
+            if file_path.exists() and file_path.stat().st_size > MAX_LOG_SIZE_BYTES:
+                # Find next rotation number
+                rotation_num = 1
+                while True:
+                    rotated_path = file_path.with_suffix(f".{rotation_num}.log")
+                    if not rotated_path.exists():
+                        break
+                    rotation_num += 1
+
+                # Rename current file
+                file_path.rename(rotated_path)
+
+                # Write rotation notice to new file
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(
+                        f"{'='*60}\n"
+                        f"LOG ROTATED - Previous: {rotated_path.name}\n"
+                        f"Session: {self.run_id} | {self._get_timestamp()}\n"
+                        f"{'='*60}\n\n"
+                    )
+        except Exception:
+            pass
 
     def _check_date_rotation(self) -> None:
         """Check if date has changed and rotate to new log folder if needed."""
@@ -279,14 +351,37 @@ class MiniTreeLogger:
         """Remove emojis from text to avoid duplicate emojis in output."""
         return EMOJI_PATTERN.sub("", text).strip()
 
+    def _mask_secrets(self, text: str) -> str:
+        """
+        Mask potential secrets in text before logging.
+
+        This prevents accidental exposure of sensitive data like tokens,
+        API keys, passwords, and webhooks in log files.
+        """
+        if not text:
+            return text
+
+        result = text
+        for pattern, replacement in SECRET_PATTERNS:
+            result = pattern.sub(replacement, result)
+        return result
+
     def _write(self, message: str, emoji: str = "", include_timestamp: bool = True) -> None:
-        """Write log message to both console and file."""
+        """Write log message to both console and file (thread-safe)."""
         # Check if we need to rotate to a new date folder
         self._check_date_rotation()
 
         # Strip any emojis from the message to avoid duplicates
         clean_message = self._strip_emojis(message)
 
+        # Mask any potential secrets in the message
+        clean_message = self._mask_secrets(clean_message)
+
+        # Add context prefix if in a context block
+        if self._context_stack:
+            context_prefix = " > ".join(self._context_stack)
+            clean_message = f"[{context_prefix}] {clean_message}"
+
         if include_timestamp:
             timestamp = self._get_timestamp()
             full_message = f"{timestamp} {emoji} {clean_message}" if emoji else f"{timestamp} {clean_message}"
@@ -295,31 +390,45 @@ class MiniTreeLogger:
 
         print(full_message)
 
-        try:
-            with open(self.log_file, "a", encoding="utf-8") as f:
-                f.write(f"{full_message}\n")
-        except (OSError, IOError):
-            pass
+        with self._lock:
+            try:
+                self._check_log_size_rotation(self.log_file)
+                with open(self.log_file, "a", encoding="utf-8") as f:
+                    f.write(f"{full_message}\n")
+            except (OSError, IOError):
+                pass
 
     def _write_raw(self, message: str, also_to_error: bool = False) -> None:
-        """Write raw message without timestamp (for tree branches)."""
-        print(message)
-        try:
-            with open(self.log_file, "a", encoding="utf-8") as f:
-                f.write(f"{message}\n")
-            if also_to_error:
-                with open(self.error_file, "a", encoding="utf-8") as f:
-                    f.write(f"{message}\n")
-        except (OSError, IOError):
-            pass
+        """Write raw message without timestamp (for tree branches, thread-safe)."""
+        # Mask any potential secrets in the message
+        safe_message = self._mask_secrets(message)
+
+        print(safe_message)
+        with self._lock:
+            try:
+                with open(self.log_file, "a", encoding="utf-8") as f:
+                    f.write(f"{safe_message}\n")
+                if also_to_error:
+                    with open(self.error_file, "a", encoding="utf-8") as f:
+                        f.write(f"{safe_message}\n")
+            except (OSError, IOError):
+                pass
 
     def _write_error(self, message: str, emoji: str = "", include_timestamp: bool = True) -> None:
-        """Write error message to both main log and error log file."""
+        """Write error message to both main log and error log file (thread-safe)."""
         # Check if we need to rotate to a new date folder
         self._check_date_rotation()
 
         clean_message = self._strip_emojis(message)
 
+        # Mask any potential secrets in the message
+        clean_message = self._mask_secrets(clean_message)
+
+        # Add context prefix if in a context block
+        if self._context_stack:
+            context_prefix = " > ".join(self._context_stack)
+            clean_message = f"[{context_prefix}] {clean_message}"
+
         if include_timestamp:
             timestamp = self._get_timestamp()
             full_message = f"{timestamp} {emoji} {clean_message}" if emoji else f"{timestamp} {clean_message}"
@@ -328,15 +437,18 @@ class MiniTreeLogger:
 
         print(full_message)
 
-        try:
-            # Write to main log
-            with open(self.log_file, "a", encoding="utf-8") as f:
-                f.write(f"{full_message}\n")
-            # Write to error log
-            with open(self.error_file, "a", encoding="utf-8") as f:
-                f.write(f"{full_message}\n")
-        except (OSError, IOError):
-            pass
+        with self._lock:
+            try:
+                self._check_log_size_rotation(self.log_file)
+                self._check_log_size_rotation(self.error_file)
+                # Write to main log
+                with open(self.log_file, "a", encoding="utf-8") as f:
+                    f.write(f"{full_message}\n")
+                # Write to error log
+                with open(self.error_file, "a", encoding="utf-8") as f:
+                    f.write(f"{full_message}\n")
+            except (OSError, IOError):
+                pass
 
     def _tree_error(
         self,
@@ -669,6 +781,66 @@ class MiniTreeLogger:
             items.extend(extra)
 
         self.tree(f"Bot Ready: {bot_name}", items, emoji="🤖")
+
+    # =========================================================================
+    # Public Methods - Context Manager
+    # =========================================================================
+
+    @contextmanager
+    def context(self, name: str) -> Generator[None, None, None]:
+        """
+        Context manager for grouping related log entries.
+
+        All log messages within this context will be prefixed with the context name,
+        making it easier to trace related operations in the logs.
+
+        Example:
+            with log.context("Download"):
+                log.info("Starting download")
+                log.info("Download complete")
+
+        Output:
+            [12:00:00 PM EST] ℹ️ [Download] Starting download
+            [12:00:00 PM EST] ℹ️ [Download] Download complete
+
+        Contexts can be nested:
+            with log.context("User:123"):
+                with log.context("Download"):
+                    log.info("Fetching")  # [User:123 > Download] Fetching
+
+        Args:
+            name: Context name to prefix log messages with
+        """
+        self._context_stack.append(name)
+        try:
+            yield
+        finally:
+            self._context_stack.pop()
+
+    def get_log_stats(self) -> Dict[str, Any]:
+        """
+        Get statistics about the current logging session.
+
+        Returns:
+            Dictionary with log file sizes, paths, and session info
+        """
+        stats: Dict[str, Any] = {
+            "run_id": self.run_id,
+            "current_date": self.current_date,
+            "log_dir": str(self.log_dir),
+        }
+
+        try:
+            if self.log_file.exists():
+                stats["log_file_size"] = self.log_file.stat().st_size
+                stats["log_file_size_mb"] = round(stats["log_file_size"] / (1024 * 1024), 2)
+            if self.error_file.exists():
+                stats["error_file_size"] = self.error_file.stat().st_size
+                stats["error_file_size_mb"] = round(stats["error_file_size"] / (1024 * 1024), 2)
+        except Exception:
+            pass
+
+        return stats
 
 
 # =============================================================================
