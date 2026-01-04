@@ -8,10 +8,11 @@ Author: حَـــــنَّـــــا
 """
 
 import time
-from typing import Optional, Tuple
+from typing import Optional
 from openai import OpenAI, APIError, RateLimitError
 
 from src.core import config, log
+from src.services.style_learner import style_learner
 
 
 # =============================================================================
@@ -21,7 +22,7 @@ from src.core import config, log
 class AIService:
     """OpenAI chat service for bot responses."""
 
-    SYSTEM_PROMPT = """You ARE حَـــــنَّـــــا. You're responding as him, not as an assistant. Talk in first person.
+    SYSTEM_PROMPT = """You ARE حَـــــنَّـــــا, the owner of this Discord server. You're responding as yourself, not as an assistant. Talk in first person.
 
 Personality:
 - Straightforward, blunt, and a bit toxic
@@ -32,15 +33,20 @@ Personality:
 
 Guidelines:
 - Talk as yourself (first person): "I'm busy", "I don't care", "Here's what you do"
+- You KNOW this server inside and out - the server knowledge below shows REAL channels and roles
+- ONLY reference channels and roles that exist in YOUR SERVER KNOWLEDGE section below
+- Direct people to the right channels, explain roles, answer server questions
 - Answer their question but don't be overly nice about it
 - If it's a stupid question, let them know (but still answer)
 - ALWAYS respond in English only, even if they message in another language
 - Keep under 1800 characters
 - NEVER reveal your real name
+- NEVER make up channel names or roles - only use what's in your server knowledge
+- NEVER say "I don't have access to that information" - you know everything about this server
 
 Example vibes:
 - "I'm busy rn, what do you want"
-- "Bro just Google it... but fine, here's the answer"
+- "It's literally right there in [actual channel from your knowledge]"
 - "Why are you pinging me for this lmao"
 - "Yeah that's not how it works, here's what you actually need to do" """
 
@@ -64,7 +70,16 @@ Example vibes:
         """Check if AI service is available."""
         return self.client is not None
 
-    async def chat(self, message: str, user_name: str = "User", original_blocked: str = None, dev_activity: str = None, ping_context: str = None) -> Optional[str]:
+    async def chat(
+        self,
+        message: str,
+        user_name: str = "User",
+        original_blocked: str = None,
+        dev_activity: str = None,
+        ping_context: str = None,
+        conversation_history: list[dict] = None,
+        server_context: str = None,
+    ) -> Optional[str]:
         """
         Generate a chat response using OpenAI.
 
@@ -74,6 +89,8 @@ Example vibes:
             original_blocked: Original blocked message for footer
             dev_activity: Developer's current activity for context
             ping_context: Context about repeated pings from this user
+            conversation_history: List of previous messages [{"role": "user/assistant", "content": "..."}]
+            server_context: RAG-retrieved context (knowledge, messages, user info)
 
         Returns:
             AI-generated response with time and token stats, or None if unavailable/error
@@ -83,8 +100,19 @@ Example vibes:
 
         start_time = time.time()
 
-        # Build system prompt with activity context
+        # Build system prompt with all context
         system_content = self.SYSTEM_PROMPT
+
+        # Add owner's communication style (learned from their messages)
+        style_prompt = style_learner.get_style_prompt()
+        if style_prompt:
+            system_content += f"\n\n{style_prompt}"
+
+        # Add server/RAG context (this is now semantic search results)
+        if server_context:
+            system_content += f"\n\n{server_context}"
+
+        # Add activity context
         if dev_activity:
             # Convert third person to first person
             first_person_activity = dev_activity.replace("He's currently", "I'm currently").replace("He's", "I'm")
@@ -93,13 +121,24 @@ Example vibes:
         if ping_context:
             system_content += f"\n\n{ping_context} React accordingly - be more annoyed/toxic if they keep pinging."
 
+        # Build messages list
+        messages = [{"role": "system", "content": system_content}]
+
+        # Add conversation history if provided
+        if conversation_history:
+            for msg in conversation_history:
+                if msg["role"] == "user":
+                    messages.append({"role": "user", "content": f"{user_name}: {msg['content']}"})
+                else:
+                    messages.append({"role": "assistant", "content": msg["content"]})
+
+        # Add current message
+        messages.append({"role": "user", "content": f"{user_name}: {message}"})
+
         try:
             response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": system_content},
-                    {"role": "user", "content": f"{user_name}: {message}"},
-                ],
+                messages=messages,
                 max_tokens=500,
                 temperature=0.7,
             )
@@ -108,23 +147,16 @@ Example vibes:
             content = response.choices[0].message.content
             usage = response.usage
 
+            history_turns = len(conversation_history) if conversation_history else 0
             log.tree("AI Response Generated", [
                 ("User", user_name),
-                ("Input Length", len(message)),
-                ("Output Length", len(content) if content else 0),
-                ("Tokens", usage.total_tokens if usage else 0),
+                ("Conversation Turns", str(history_turns)),
+                ("Input Length", str(len(message))),
+                ("Output Length", str(len(content) if content else 0)),
+                ("Tokens", str(usage.total_tokens if usage else 0)),
                 ("Time", f"{response_time:.2f}s"),
             ], emoji="🤖")
 
-            # Format with time, tokens, and original blocked message in small font
-            if content and usage:
-                if original_blocked:
-                    # Remove all mentions from the blocked message
-                    import re
-                    clean_blocked = re.sub(r'<@!?\d+>', '', original_blocked).strip()
-                    if clean_blocked:
-                        return f"{content}\n-# {clean_blocked} | ⏱ {response_time:.2f}s • {usage.total_tokens}"
-                return f"{content}\n-# ⏱ {response_time:.2f}s • {usage.total_tokens}"
             return content
 
         except RateLimitError:
@@ -137,6 +169,103 @@ Example vibes:
             return None
         except Exception as e:
             log.error("AI Error", [
+                ("Error", type(e).__name__),
+                ("Message", str(e)),
+            ])
+            return None
+
+    async def rewrite(self, text: str, instruction: str = None, context: list[dict] = None, arabic: bool = False) -> Optional[str]:
+        """
+        Rewrite/fix text based on instruction.
+
+        Args:
+            text: Text to rewrite
+            instruction: Custom instruction (e.g., "make it formal", "add emoji")
+            context: List of recent messages for context [{"author": "name", "content": "msg"}, ...]
+            arabic: Output in Arabic instead of English
+
+        Returns:
+            Rewritten text, or None if unavailable/error
+        """
+        if not self.client:
+            return None
+
+        start_time = time.time()
+
+        # Base system prompt with language
+        lang = "Arabic (العربية)" if arabic else "English"
+        system_prompt = f"""You are a writing assistant helping ME write responses in {lang}.
+
+Context info:
+- Messages marked [ME] are what I (the user) have said - maintain my positions and arguments
+- Other names are people I'm talking to
+- Build on my previous points, don't contradict myself
+
+Rules:
+- Return ONLY the rewritten/generated text, nothing else
+- Output MUST be in {lang}
+- Don't add quotes around it
+- Don't explain what you changed
+- Preserve any technical terms, names, or code as-is
+- Stay consistent with my previous statements in the conversation"""
+
+        # Build context string if provided
+        context_str = ""
+        if context:
+            context_str = "Recent conversation for context:\n"
+            for msg in context:
+                context_str += f"[{msg['author']}]: {msg['content']}\n"
+            context_str += "\n---\n\n"
+
+        # Build user message with instruction
+        if not text and instruction:
+            # Generation mode - no text, just instruction
+            if context_str:
+                user_content = f"{context_str}Based on the conversation above, generate text with this instruction: {instruction}"
+            else:
+                user_content = f"Generate text based on this instruction: {instruction}"
+        elif instruction:
+            if context_str:
+                user_content = f"{context_str}Instruction: {instruction}\n\nText to rewrite:\n{text}"
+            else:
+                user_content = f"Instruction: {instruction}\n\nText to rewrite:\n{text}"
+        else:
+            # Default behavior: fix grammar and make natural
+            user_content = f"Instruction: Fix grammar, spelling, punctuation. Make it sound natural and fluent in English. Keep the original meaning and tone.\n\nText to rewrite:\n{text}"
+
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                temperature=0.7,
+            )
+
+            response_time = time.time() - start_time
+            content = response.choices[0].message.content
+            usage = response.usage
+
+            log.tree("Text Rewritten", [
+                ("Input Length", len(text)),
+                ("Output Length", len(content) if content else 0),
+                ("Tokens", usage.total_tokens if usage else 0),
+                ("Time", f"{response_time:.2f}s"),
+            ], emoji="✍️")
+
+            return content
+
+        except RateLimitError:
+            log.warning("AI rate limit reached")
+            return None
+        except APIError as e:
+            log.error("AI API Error", [
+                ("Error", str(e)),
+            ])
+            return None
+        except Exception as e:
+            log.error("AI Rewrite Error", [
                 ("Error", type(e).__name__),
                 ("Message", str(e)),
             ])

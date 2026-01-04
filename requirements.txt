@@ -10,13 +10,8 @@ discord.py>=2.3.0
 # API Server
 aiohttp>=3.9.0
 
-# OpenAI
+# OpenAI (for AI ping responder + embeddings)
 openai
 
-# Media Downloader
-yt-dlp
-
-# Translation
-deep-translator
-langdetect
-duckduckgo_search
+# Vector database for RAG
+chromadb
