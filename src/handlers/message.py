@@ -46,6 +46,81 @@ CONVERSATION_MAX_TURNS = 6  # Max exchanges to keep in context (3 user + 3 AI)
 FOLLOWUP_COOLDOWN = 30  # 30 second cooldown for follow-up messages (shorter than initial)
 MAX_FOLLOWUPS = 1  # Only allow 1 follow-up reply before requiring full cooldown
 
+# =============================================================================
+# Memory Management
+# =============================================================================
+
+MAX_TRACKED_USERS = 500  # Max users to track in memory
+CLEANUP_INTERVAL = 300  # Run cleanup every 5 minutes
+_last_cleanup = 0
+
+
+def _cleanup_memory() -> None:
+    """
+    Periodic cleanup to prevent memory leaks.
+    Removes old/stale entries from all tracking dicts.
+    """
+    global _last_cleanup
+    now = time.time()
+
+    # Only run cleanup every CLEANUP_INTERVAL seconds
+    if now - _last_cleanup < CLEANUP_INTERVAL:
+        return
+    _last_cleanup = now
+
+    cleaned = {"pings": 0, "cooldowns": 0, "conversations": 0}
+
+    # Clean ping history - remove users with no recent pings
+    users_to_remove = []
+    for user_id, pings in _ping_history.items():
+        # Filter old pings
+        fresh_pings = [(ts, msg) for ts, msg in pings if now - ts < config.PING_HISTORY_WINDOW]
+        if fresh_pings:
+            _ping_history[user_id] = fresh_pings
+        else:
+            users_to_remove.append(user_id)
+
+    for user_id in users_to_remove:
+        del _ping_history[user_id]
+        cleaned["pings"] += 1
+
+    # Clean cooldowns - remove expired entries (older than 2 hours)
+    expired_cooldowns = [
+        user_id for user_id, ts in _ai_cooldowns.items()
+        if now - ts > AI_COOLDOWN_SECONDS * 2
+    ]
+    for user_id in expired_cooldowns:
+        del _ai_cooldowns[user_id]
+        cleaned["cooldowns"] += 1
+
+    # Clean conversations - remove expired
+    expired_convos = [
+        user_id for user_id, conv in _conversations.items()
+        if now - conv.get("last_activity", 0) > CONVERSATION_TIMEOUT
+    ]
+    for user_id in expired_convos:
+        del _conversations[user_id]
+        cleaned["conversations"] += 1
+
+    # If still too many entries, evict oldest
+    if len(_ai_cooldowns) > MAX_TRACKED_USERS:
+        sorted_cooldowns = sorted(_ai_cooldowns.items(), key=lambda x: x[1])
+        to_evict = len(_ai_cooldowns) - MAX_TRACKED_USERS
+        for user_id, _ in sorted_cooldowns[:to_evict]:
+            del _ai_cooldowns[user_id]
+            cleaned["cooldowns"] += 1
+
+    total_cleaned = sum(cleaned.values())
+    if total_cleaned > 0:
+        log.tree("Memory Cleanup", [
+            ("Pings Removed", str(cleaned["pings"])),
+            ("Cooldowns Removed", str(cleaned["cooldowns"])),
+            ("Conversations Removed", str(cleaned["conversations"])),
+            ("Ping Users", str(len(_ping_history))),
+            ("Cooldown Users", str(len(_ai_cooldowns))),
+            ("Active Convos", str(len(_conversations))),
+        ], emoji="🧹")
+
 
 def _get_conversation(user_id: int) -> dict | None:
     """Get active conversation for user, or None if expired/doesn't exist."""
@@ -732,6 +807,9 @@ async def on_message(bot: discord.Client, message: discord.Message) -> None:
     Developer pings are blocked by AutoMod when in DND mode.
     Detects replies to AI responses for multi-turn conversations.
     """
+    # Run periodic memory cleanup
+    _cleanup_memory()
+
     # Check for Disboard bump confirmation (before skipping bots)
     if message.author.id == DISBOARD_BOT_ID:
         # Disboard sends an embed with "Bump done!" when successful
