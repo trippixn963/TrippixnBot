@@ -193,15 +193,19 @@ class RAGService:
         content = f"Q: {question}\nA: {answer}"
         return self.add_knowledge(content, "faq", {"question": question})
 
-    def add_channel_info(self, channel_name: str, description: str) -> bool:
-        """Add channel description."""
-        content = f"#{channel_name}: {description}"
-        return self.add_knowledge(content, "channel", {"channel": channel_name})
+    def add_channel_info(self, channel_id: int, channel_name: str, description: str) -> bool:
+        """Add channel description with ID for proper Discord mentions."""
+        # Format: <#ID> (name) - description
+        # This allows AI to copy <#ID> for proper channel pings
+        content = f"<#{channel_id}> ({channel_name}): {description}"
+        return self.add_knowledge(content, "channel", {"channel": channel_name, "channel_id": str(channel_id)})
 
-    def add_role_info(self, role_name: str, description: str) -> bool:
-        """Add role description."""
-        content = f"@{role_name}: {description}"
-        return self.add_knowledge(content, "role", {"role": role_name})
+    def add_role_info(self, role_id: int, role_name: str, description: str) -> bool:
+        """Add role description with ID for proper Discord mentions."""
+        # Format: <@&ID> (@name) - description
+        # This allows AI to copy <@&ID> for proper role pings
+        content = f"<@&{role_id}> (@{role_name}): {description}"
+        return self.add_knowledge(content, "role", {"role": role_name, "role_id": str(role_id)})
 
     def add_rule(self, rule_number: int, rule_text: str) -> bool:
         """Add a server rule."""
@@ -465,13 +469,13 @@ class RAGService:
 
         indexed = 0
 
-        # Index channels
+        # Index channels with IDs for proper Discord mentions
         for channel in guild.text_channels:
             desc = channel.topic or f"Text channel in {channel.category.name if channel.category else 'server'}"
-            if self.add_channel_info(channel.name, desc):
+            if self.add_channel_info(channel.id, channel.name, desc):
                 indexed += 1
 
-        # Index roles
+        # Index roles with IDs for proper Discord mentions
         for role in guild.roles:
             if role.name == "@everyone":
                 continue
@@ -489,7 +493,7 @@ class RAGService:
             if perms:
                 desc += f" ({', '.join(perms)})"
 
-            if self.add_role_info(role.name, desc):
+            if self.add_role_info(role.id, role.name, desc):
                 indexed += 1
 
         log.tree("Server Structure Indexed", [

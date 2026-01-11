@@ -14,7 +14,7 @@ import discord
 from discord.ext import commands
 
 from src.core import config, log
-from src.services import StatsAPI, server_intel, rag_service, auto_learner, style_learner
+from src.services import StatsAPI, server_intel, rag_service, auto_learner, style_learner, feedback_learner
 from src.services.bump_service import bump_service
 from src.handlers import on_ready, on_presence_update, on_message, on_automod_action
 from src.utils import http_session
@@ -85,6 +85,7 @@ class TrippixnBot(commands.Bot):
         intents.members = True
         intents.presences = True
         intents.message_content = True  # Required for reading message content
+        intents.auto_moderation_execution = True  # Required for automod ping interception
 
         super().__init__(
             command_prefix="!trp ",
@@ -229,6 +230,10 @@ class TrippixnBot(commands.Bot):
         if not style_learner._initialized:
             await style_learner.setup()
 
+        # Start feedback learner (tracks corrections and reactions)
+        if not feedback_learner._initialized:
+            await feedback_learner.setup()
+
         # Start bump reminder if configured (only once, not on reconnects)
         if config.BUMP_CHANNEL_ID and config.BUMP_ROLE_ID and not bump_service._running:
             bump_service.setup(self, config.BUMP_CHANNEL_ID, config.BUMP_ROLE_ID)
@@ -247,6 +252,28 @@ class TrippixnBot(commands.Bot):
         """Handle AutoMod actions - respond when developer ping is blocked."""
         await on_automod_action(self, execution)
 
+    async def on_reaction_add(self, reaction: discord.Reaction, user: discord.User) -> None:
+        """Handle reactions to bot messages for feedback learning."""
+        # Skip bot reactions
+        if user.bot:
+            return
+
+        # Check if this is a reaction to a tracked bot message
+        message_id = reaction.message.id
+        if feedback_learner.is_bot_message(message_id):
+            emoji = str(reaction.emoji)
+            feedback = feedback_learner.record_reaction(
+                message_id=message_id,
+                user_id=user.id,
+                emoji=emoji,
+            )
+            if feedback:
+                log.tree("Reaction Feedback", [
+                    ("User", str(user)),
+                    ("Emoji", emoji),
+                    ("Type", "Positive" if feedback.is_positive else "Negative"),
+                ], emoji="📊")
+
     async def close(self) -> None:
         """Clean shutdown."""
         log.tree("Shutting Down", [
@@ -255,6 +282,7 @@ class TrippixnBot(commands.Bot):
         ], emoji="🛑")
         auto_learner.stop()
         style_learner.stop()
+        feedback_learner.stop()
         bump_service.stop()
         await self.stats_api.stop()
         await http_session.stop()

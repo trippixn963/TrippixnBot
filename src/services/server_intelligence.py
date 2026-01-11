@@ -338,17 +338,18 @@ class ServerIntelligence:
             lines.append(f"  {name} (@{role})")
         lines.append("")
 
-        # Categories and channels
-        lines.append("=== CHANNELS ===")
+        # Categories and channels (with IDs for proper Discord mentions)
+        lines.append("=== CHANNELS (use <#id> format to mention) ===")
         for category, channels in sorted(self.categories.items()):
             lines.append(f"[{category}]")
             for ch_name in channels[:10]:  # Limit per category
                 # Find channel context
                 ch_ctx = next((c for c in self.channels.values() if c.name == ch_name), None)
-                if ch_ctx and ch_ctx.topic:
-                    lines.append(f"  #{ch_name} - {ch_ctx.topic[:50]}")
-                else:
-                    lines.append(f"  #{ch_name}")
+                if ch_ctx:
+                    if ch_ctx.topic:
+                        lines.append(f"  <#{ch_ctx.id}> ({ch_name}) - {ch_ctx.topic[:50]}")
+                    else:
+                        lines.append(f"  <#{ch_ctx.id}> ({ch_name})")
         lines.append("")
 
         # Notable roles

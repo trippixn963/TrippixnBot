@@ -17,6 +17,7 @@ import time
 from src.core import config, log
 from src.services import ai_service, stats_store, message_counter, server_intel, rag_service, auto_learner
 from src.services.bump_service import bump_service
+from src.services.feedback_learner import feedback_learner
 
 # Disboard bot ID
 DISBOARD_BOT_ID = 302050872383242240
@@ -222,6 +223,179 @@ async def _get_developer_activity_context() -> str:
 
 
 # =============================================================================
+# Enhanced Context Functions
+# =============================================================================
+
+def _get_time_context() -> str:
+    """Get time-aware context for AI responses."""
+    from datetime import datetime
+    import pytz
+
+    # Use EST timezone (server timezone)
+    try:
+        tz = pytz.timezone("America/New_York")
+        now = datetime.now(tz)
+    except Exception:
+        now = datetime.now()
+
+    hour = now.hour
+    time_str = now.strftime("%I:%M %p")
+
+    if 0 <= hour < 5:
+        log.tree("Time Context Applied", [
+            ("Time", time_str),
+            ("Period", "Late Night (12am-5am)"),
+            ("Mood", "Extra grumpy"),
+        ], emoji="🌙")
+        return "TIME CONTEXT: It's very late at night (midnight to 5am). You're probably tired/sleeping. Be extra grumpy about being pinged at this hour."
+    elif 5 <= hour < 8:
+        log.tree("Time Context Applied", [
+            ("Time", time_str),
+            ("Period", "Early Morning (5am-8am)"),
+            ("Mood", "Groggy/annoyed"),
+        ], emoji="🌅")
+        return "TIME CONTEXT: It's early morning (5-8am). You might be just waking up or still sleeping. Can be groggy/annoyed."
+    elif 22 <= hour < 24:
+        log.tree("Time Context Applied", [
+            ("Time", time_str),
+            ("Period", "Late Evening (10pm-12am)"),
+            ("Mood", "Winding down"),
+        ], emoji="🌃")
+        return "TIME CONTEXT: It's late night (10pm-midnight). You're probably winding down. Can mention you're about to sleep if relevant."
+    else:
+        return ""  # Normal hours, no special context
+
+
+async def _classify_ping_intent(message: str) -> str:
+    """
+    Classify the intent behind a ping using keywords.
+
+    Returns context string about the intent.
+    """
+    msg_lower = message.lower()
+
+    # Question indicators
+    question_words = ["how", "what", "where", "when", "why", "who", "which", "can", "could", "would", "is", "are", "do", "does"]
+    has_question_mark = "?" in message
+
+    # Help indicators
+    help_words = ["help", "stuck", "issue", "problem", "error", "bug", "broken", "doesn't work", "not working", "failed", "fix"]
+
+    # Greeting indicators
+    greeting_words = ["hi", "hello", "hey", "yo", "sup", "what's up", "wassup", "hola", "greetings"]
+
+    # Feedback indicators
+    feedback_words = ["suggestion", "idea", "feedback", "feature", "request", "should", "could you add"]
+
+    # Spam/low effort indicators
+    if len(message.strip()) < 3 or message.strip() in [".", "?", "!", "??", "!!!"]:
+        log.tree("Ping Intent Classified", [
+            ("Intent", "Low-effort/Spam"),
+            ("Message", message[:30] + "..." if len(message) > 30 else message),
+            ("Response", "Dismissive"),
+        ], emoji="🚫")
+        return "INTENT: This looks like a low-effort ping. Be dismissive."
+
+    # Check for greetings (usually at start)
+    first_word = msg_lower.split()[0] if msg_lower.split() else ""
+    if first_word in greeting_words or msg_lower.startswith(tuple(greeting_words)):
+        log.tree("Ping Intent Classified", [
+            ("Intent", "Greeting"),
+            ("Trigger", first_word),
+            ("Response", "Casual/brief"),
+        ], emoji="👋")
+        return "INTENT: User is just saying hi/greeting you. Keep it casual and brief."
+
+    # Check for help/issues
+    if any(word in msg_lower for word in help_words):
+        matched = [w for w in help_words if w in msg_lower][0]
+        log.tree("Ping Intent Classified", [
+            ("Intent", "Help Request"),
+            ("Trigger", matched),
+            ("Response", "Helpful"),
+        ], emoji="🆘")
+        return "INTENT: User needs help with something. Be helpful but maintain your personality."
+
+    # Check for questions
+    if has_question_mark or any(msg_lower.startswith(w) for w in question_words):
+        log.tree("Ping Intent Classified", [
+            ("Intent", "Question"),
+            ("Has ?", str(has_question_mark)),
+            ("Response", "Direct answer"),
+        ], emoji="❓")
+        return "INTENT: User is asking a question. Answer it directly."
+
+    # Check for feedback
+    if any(word in msg_lower for word in feedback_words):
+        matched = [w for w in feedback_words if w in msg_lower][0]
+        log.tree("Ping Intent Classified", [
+            ("Intent", "Feedback"),
+            ("Trigger", matched),
+            ("Response", "Acknowledge"),
+        ], emoji="💡")
+        return "INTENT: User is giving feedback or making a suggestion. Acknowledge it."
+
+    log.tree("Ping Intent Classified", [
+        ("Intent", "Unclear"),
+        ("Response", "AI decides"),
+    ], emoji="🤔")
+    return ""  # Unclear intent, let AI figure it out
+
+
+def _get_repeated_question_context(user_id: int, message: str) -> str:
+    """
+    Check if user has asked similar questions recently.
+
+    Uses RAG to find semantically similar past questions from this user.
+    """
+    if not rag_service.is_available:
+        return ""
+
+    try:
+        # Search for similar messages
+        results = rag_service.retrieve(
+            message,
+            n_results=10,
+            collections=[rag_service.MESSAGES_COLLECTION]
+        )
+
+        # Filter to this user's messages
+        user_messages = [
+            r for r in results
+            if r.metadata.get("author_id") == str(user_id) and r.relevance > 0.7
+        ]
+
+        if len(user_messages) >= 2:
+            top_match = user_messages[0]
+            log.tree("Repeated Question Detected", [
+                ("User ID", str(user_id)),
+                ("Similar Questions", str(len(user_messages))),
+                ("Top Match Score", f"{top_match.relevance:.2f}"),
+                ("Previous", top_match.content[:40] + "..."),
+                ("Annoyance", "High"),
+            ], emoji="🔄")
+            return f"REPEATED QUESTION: This user has asked {len(user_messages)} similar questions before. Be a bit more annoyed - they should know this by now."
+        elif len(user_messages) == 1:
+            match = user_messages[0]
+            log.tree("Repeated Question Detected", [
+                ("User ID", str(user_id)),
+                ("Similar Questions", "1"),
+                ("Match Score", f"{match.relevance:.2f}"),
+                ("Previous", match.content[:40] + "..."),
+                ("Annoyance", "Low"),
+            ], emoji="🔁")
+            return "REPEATED QUESTION: This user asked something similar before. You can reference that if relevant."
+
+        return ""
+
+    except Exception as e:
+        log.tree("Repeated Question Check Failed", [
+            ("Error", str(e)[:50]),
+        ], emoji="⚠️")
+        return ""
+
+
+# =============================================================================
 # Conversation Reply Handler
 # =============================================================================
 
@@ -382,6 +556,19 @@ async def on_message(bot: discord.Client, message: discord.Message) -> None:
         # Auto-learn from message (indexes + extracts FAQs from Q&A patterns)
         await auto_learner.learn_from_message(message)
 
+        # Check for owner correction (owner sends message after bot responded)
+        if message.author.id == config.OWNER_ID:
+            channel_id = message.channel.id
+            correction = feedback_learner.check_for_correction(
+                channel_id=channel_id,
+                owner_message=message.content,
+            )
+            if correction:
+                log.tree("Owner Correction Learned", [
+                    ("Channel", message.channel.name if hasattr(message.channel, 'name') else str(channel_id)),
+                    ("Correction", message.content[:50] + "..." if len(message.content) > 50 else message.content),
+                ], emoji="📝")
+
     # Check for reply to AI response (multi-turn conversation)
     if message.reference and message.reference.message_id:
         await _handle_conversation_reply(bot, message)
@@ -476,6 +663,15 @@ async def on_automod_action(bot: discord.Client, execution: discord.AutoModActio
     # Get ping history context
     ping_context = _get_ping_context(user_id, cleaned_content)
 
+    # Get time-aware context
+    time_context = _get_time_context()
+
+    # Classify ping intent
+    intent_context = await _classify_ping_intent(cleaned_content)
+
+    # Check for repeated questions from this user
+    repeated_context = _get_repeated_question_context(user_id, cleaned_content)
+
     # Get RAG context (semantic search) - this replaces the old server_intel approach
     rag_context = ""
     if rag_service.is_available:
@@ -490,8 +686,10 @@ async def on_automod_action(bot: discord.Client, execution: discord.AutoModActio
         ("Original Message", content[:80] + "..." if len(content) > 80 else content),
         ("Dev Activity", dev_activities if dev_activities else "None"),
         ("Ping Context", ping_context if ping_context else "First ping"),
+        ("Time Context", time_context[:30] + "..." if time_context else "Normal hours"),
+        ("Intent", intent_context[:30] + "..." if intent_context else "Unclear"),
+        ("Repeated", repeated_context[:30] + "..." if repeated_context else "No"),
         ("RAG Context", "Yes" if rag_context else "No"),
-        ("Fallback Context", "Yes" if server_context else "No"),
     ], emoji="🤖")
 
     # Get existing conversation history (for multi-turn)
@@ -509,6 +707,9 @@ async def on_automod_action(bot: discord.Client, execution: discord.AutoModActio
                 ping_context=ping_context,
                 conversation_history=conversation_history,
                 server_context=rag_context or server_context,  # RAG context preferred
+                time_context=time_context,
+                intent_context=intent_context,
+                repeated_context=repeated_context,
             )
 
         if response:
@@ -528,10 +729,19 @@ async def on_automod_action(bot: discord.Client, execution: discord.AutoModActio
             _add_to_conversation(user_id, "user", cleaned_content)
             _add_to_conversation(user_id, "assistant", response, sent_message.id)
 
+            # Track bot response for feedback learning (corrections + reactions)
+            feedback_learner.track_bot_response(
+                message_id=sent_message.id,
+                channel_id=execution.channel_id,
+                response=response,
+                original_question=cleaned_content,
+            )
+
             log.tree("AI Response Sent", [
                 ("To User", user_name),
                 ("Response Length", len(response)),
                 ("Channel", f"#{channel.name}" if hasattr(channel, 'name') else str(channel)),
+                ("Tracked", "Yes"),
             ], emoji="✅")
 
             # Send webhook notification
