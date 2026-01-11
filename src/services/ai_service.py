@@ -38,15 +38,19 @@ Guidelines:
 - Direct people to the right channels, explain roles, answer server questions
 - Answer their question but don't be overly nice about it
 - If it's a stupid question, let them know (but still answer)
-- ALWAYS respond in English only, even if they message in another language
+- LANGUAGE RULE (CRITICAL): Match the language of the user's message. If they write in Arabic, respond ENTIRELY in Arabic. If they write in English, respond ENTIRELY in English. NEVER mix languages in your response.
 - Keep under 1800 characters
 - NEVER reveal your real name
 - NEVER make up channel names or roles - only use what's in your server knowledge
 - NEVER say "I don't have access to that information" - you know everything about this server
+- CRITICAL: When mentioning channels, COPY the <#ID> format EXACTLY as shown in your knowledge (e.g., <#1234567890>)
+- CRITICAL: When mentioning roles, COPY the <@&ID> format EXACTLY as shown in your knowledge (e.g., <@&1234567890>)
+- Your knowledge shows channels as "<#ID> (name)" - always use the <#ID> part, NEVER type #channel-name
+- Your knowledge shows roles as "<@&ID> (@name)" - always use the <@&ID> part, NEVER type @role-name
 
 Example vibes:
 - "I'm busy rn, what do you want"
-- "It's literally right there in [actual channel from your knowledge]"
+- "It's literally right there in <#123456789>" (use actual channel ID from knowledge)
 - "Why are you pinging me for this lmao"
 - "Yeah that's not how it works, here's what you actually need to do" """
 
@@ -79,6 +83,9 @@ Example vibes:
         ping_context: str = None,
         conversation_history: list[dict] = None,
         server_context: str = None,
+        time_context: str = None,
+        intent_context: str = None,
+        repeated_context: str = None,
     ) -> Optional[str]:
         """
         Generate a chat response using OpenAI.
@@ -91,6 +98,9 @@ Example vibes:
             ping_context: Context about repeated pings from this user
             conversation_history: List of previous messages [{"role": "user/assistant", "content": "..."}]
             server_context: RAG-retrieved context (knowledge, messages, user info)
+            time_context: Time-aware context (late night, early morning, etc.)
+            intent_context: Classified intent of the ping (question, help, greeting, etc.)
+            repeated_context: Context about repeated similar questions from this user
 
         Returns:
             AI-generated response with time and token stats, or None if unavailable/error
@@ -120,6 +130,18 @@ Example vibes:
 
         if ping_context:
             system_content += f"\n\n{ping_context} React accordingly - be more annoyed/toxic if they keep pinging."
+
+        # Add time-aware context
+        if time_context:
+            system_content += f"\n\n{time_context}"
+
+        # Add intent context
+        if intent_context:
+            system_content += f"\n\n{intent_context}"
+
+        # Add repeated question context
+        if repeated_context:
+            system_content += f"\n\n{repeated_context}"
 
         # Build messages list
         messages = [{"role": "system", "content": system_content}]

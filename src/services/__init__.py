@@ -13,6 +13,7 @@ from src.services.server_intelligence import server_intel, ServerIntelligence
 from src.services.rag_service import rag_service, RAGService
 from src.services.auto_learner import auto_learner, AutoLearner
 from src.services.style_learner import style_learner, StyleLearner
+from src.services.feedback_learner import feedback_learner, FeedbackLearner
 
 __all__ = [
     "StatsAPI", "stats_store",
@@ -23,4 +24,5 @@ __all__ = [
     "rag_service", "RAGService",
     "auto_learner", "AutoLearner",
     "style_learner", "StyleLearner",
+    "feedback_learner", "FeedbackLearner",
 ]

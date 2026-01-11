@@ -15,3 +15,6 @@ openai
 
 # Vector database for RAG
 chromadb
+
+# Timezone handling
+pytz
