@@ -38,11 +38,12 @@ AI_COOLDOWN_SECONDS = 3600  # 1 hour cooldown between AI responses per user
 # Multi-Turn Conversation Tracking
 # =============================================================================
 
-# Conversation history: {user_id: {"messages": [...], "last_ai_message_id": int, "last_activity": float}}
+# Conversation history: {user_id: {"messages": [...], "last_ai_message_id": int, "last_activity": float, "followup_used": bool}}
 _conversations: dict[int, dict] = {}
 CONVERSATION_TIMEOUT = 900  # 15 minutes - conversations expire after this
 CONVERSATION_MAX_TURNS = 6  # Max exchanges to keep in context (3 user + 3 AI)
 FOLLOWUP_COOLDOWN = 30  # 30 second cooldown for follow-up messages (shorter than initial)
+MAX_FOLLOWUPS = 1  # Only allow 1 follow-up reply before requiring full cooldown
 
 
 def _get_conversation(user_id: int) -> dict | None:
@@ -74,6 +75,7 @@ def _add_to_conversation(user_id: int, role: str, content: str, message_id: int 
             "messages": [],
             "last_ai_message_id": None,
             "last_activity": now,
+            "followup_count": 0,
         }
 
     conv = _conversations[user_id]
@@ -413,7 +415,35 @@ async def _handle_conversation_reply(bot: discord.Client, message: discord.Messa
     if conv.get("last_ai_message_id") != replied_to_id:
         return  # Not replying to our message
 
-    # Check follow-up cooldown (shorter than initial)
+    # Check if user has used their follow-up already
+    followup_count = conv.get("followup_count", 0)
+    if followup_count >= MAX_FOLLOWUPS:
+        # Already used follow-up, check full cooldown
+        now = time.time()
+        last_response = _ai_cooldowns.get(user_id, 0)
+        time_since_last = now - last_response
+
+        if time_since_last < AI_COOLDOWN_SECONDS:
+            remaining = int(AI_COOLDOWN_SECONDS - time_since_last)
+            remaining_mins = remaining // 60
+            remaining_secs = remaining % 60
+
+            log.tree("Follow-up Limit Reached", [
+                ("User", f"{message.author.name} ({message.author.display_name})"),
+                ("User ID", str(user_id)),
+                ("Followups Used", str(followup_count)),
+                ("Cooldown Remaining", f"{remaining_mins}m {remaining_secs}s"),
+            ], emoji="🚫")
+            try:
+                if remaining_mins > 0:
+                    await message.reply(f"You've used your follow-up. Wait {remaining_mins}m {remaining_secs}s to ping me again.", delete_after=10)
+                else:
+                    await message.reply(f"You've used your follow-up. Wait {remaining_secs}s to ping me again.", delete_after=10)
+            except Exception:
+                pass
+            return
+
+    # Check follow-up cooldown (shorter than initial, just to prevent spam)
     now = time.time()
     last_response = _ai_cooldowns.get(user_id, 0)
     time_since_last = now - last_response
@@ -487,6 +517,10 @@ async def _handle_conversation_reply(bot: discord.Client, message: discord.Messa
             # Update cooldown
             _ai_cooldowns[user_id] = time.time()
 
+            # Increment follow-up count
+            conv["followup_count"] = conv.get("followup_count", 0) + 1
+            followups_used = conv["followup_count"]
+
             # Add to conversation history
             _add_to_conversation(user_id, "user", content)
             _add_to_conversation(user_id, "assistant", response, sent_message.id)
@@ -495,8 +529,19 @@ async def _handle_conversation_reply(bot: discord.Client, message: discord.Messa
                 ("User", f"{message.author.name} ({message.author.display_name})"),
                 ("User ID", str(user_id)),
                 ("Response Length", str(len(response))),
+                ("Followups Used", f"{followups_used}/{MAX_FOLLOWUPS}"),
                 ("Total Turns", str(len(conv["messages"]) + 2)),
             ], emoji="✅")
+
+            # If max followups reached, clear conversation to prevent further replies
+            if followups_used >= MAX_FOLLOWUPS:
+                _clear_conversation(user_id)
+                log.tree("Conversation Ended", [
+                    ("User", f"{message.author.name} ({message.author.display_name})"),
+                    ("User ID", str(user_id)),
+                    ("Reason", "Max follow-ups reached"),
+                    ("Next Ping Available", f"{AI_COOLDOWN_SECONDS // 60}m"),
+                ], emoji="🔒")
         else:
             log.tree("AI Empty Response", [
                 ("User ID", str(user_id)),
