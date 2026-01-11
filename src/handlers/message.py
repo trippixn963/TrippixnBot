@@ -18,6 +18,7 @@ from src.core import config, log
 from src.services import ai_service, stats_store, message_counter, server_intel, rag_service, auto_learner
 from src.services.bump_service import bump_service
 from src.services.feedback_learner import feedback_learner
+from src.services.user_memory import user_memory
 
 # Disboard bot ID
 DISBOARD_BOT_ID = 302050872383242240
@@ -344,6 +345,132 @@ async def _classify_ping_intent(message: str) -> str:
     return ""  # Unclear intent, let AI figure it out
 
 
+# =============================================================================
+# Language Detection
+# =============================================================================
+
+# Arabic Unicode ranges
+ARABIC_RANGE = range(0x0600, 0x06FF)  # Arabic
+ARABIC_EXTENDED = range(0x0750, 0x077F)  # Arabic Supplement
+ARABIC_PRESENTATION_A = range(0xFB50, 0xFDFF)  # Arabic Presentation Forms-A
+ARABIC_PRESENTATION_B = range(0xFE70, 0xFEFF)  # Arabic Presentation Forms-B
+
+
+def _detect_language(text: str) -> str:
+    """
+    Detect if text is primarily Arabic or English.
+
+    Returns: 'arabic', 'english', or 'mixed'
+    """
+    if not text:
+        return "english"
+
+    arabic_chars = 0
+    english_chars = 0
+
+    for char in text:
+        code = ord(char)
+        if (code in ARABIC_RANGE or code in ARABIC_EXTENDED or
+            code in ARABIC_PRESENTATION_A or code in ARABIC_PRESENTATION_B):
+            arabic_chars += 1
+        elif char.isalpha() and ord(char) < 128:
+            english_chars += 1
+
+    total = arabic_chars + english_chars
+    if total == 0:
+        return "english"
+
+    arabic_ratio = arabic_chars / total
+
+    if arabic_ratio > 0.5:
+        return "arabic"
+    elif arabic_ratio > 0.2:
+        return "mixed"
+    else:
+        return "english"
+
+
+def _verify_language_match(input_text: str, response_text: str) -> tuple[bool, str, str]:
+    """
+    Verify that the AI response matches the input language.
+
+    Returns: (matches, input_lang, response_lang)
+    """
+    input_lang = _detect_language(input_text)
+    response_lang = _detect_language(response_text)
+
+    # Mixed is acceptable for either
+    if input_lang == "mixed" or response_lang == "mixed":
+        return True, input_lang, response_lang
+
+    matches = input_lang == response_lang
+    return matches, input_lang, response_lang
+
+
+# =============================================================================
+# Parallel Context Fetching
+# =============================================================================
+
+async def _fetch_all_context(
+    user_id: int,
+    message: str,
+) -> dict:
+    """
+    Fetch all context in parallel for better performance.
+
+    Returns dict with: dev_activity, rag_context, user_context, sentiment_context
+    """
+    async def get_lanyard():
+        return await _get_developer_activity_context()
+
+    async def get_rag():
+        if rag_service.is_available:
+            return rag_service.build_context(message, max_tokens=1500)
+        return ""
+
+    async def get_user_memory():
+        # Record interaction (also extracts topics)
+        user_memory.record_interaction(user_id, message)
+        # Get user context (topics + patterns)
+        return user_memory.get_user_context(user_id)
+
+    async def get_sentiment():
+        return user_memory.detect_current_sentiment(message)
+
+    # Fetch all in parallel
+    start = time.time()
+    results = await asyncio.gather(
+        get_lanyard(),
+        get_rag(),
+        get_user_memory(),
+        get_sentiment(),
+        return_exceptions=True,
+    )
+
+    elapsed = time.time() - start
+
+    # Handle results (replace exceptions with empty strings)
+    dev_activity = results[0] if not isinstance(results[0], Exception) else ""
+    rag_context = results[1] if not isinstance(results[1], Exception) else ""
+    user_context = results[2] if not isinstance(results[2], Exception) else ""
+    sentiment_context = results[3] if not isinstance(results[3], Exception) else ""
+
+    log.tree("Parallel Context Fetch", [
+        ("Time", f"{elapsed*1000:.0f}ms"),
+        ("Lanyard", "Yes" if dev_activity else "No"),
+        ("RAG", "Yes" if rag_context else "No"),
+        ("User Memory", "Yes" if user_context else "No"),
+        ("Sentiment", "Yes" if sentiment_context else "No"),
+    ], emoji="⚡")
+
+    return {
+        "dev_activity": dev_activity,
+        "rag_context": rag_context,
+        "user_context": user_context,
+        "sentiment_context": sentiment_context,
+    }
+
+
 def _get_repeated_question_context(user_id: int, message: str) -> str:
     """
     Check if user has asked similar questions recently.
@@ -482,17 +609,26 @@ async def _handle_conversation_reply(bot: discord.Client, message: discord.Messa
         ], emoji="⚠️")
         return
 
-    # Get developer's current activities for context
-    dev_activities = await _get_developer_activity_context()
-
-    # Get RAG context (semantic search)
-    rag_context = ""
-    if rag_service.is_available:
-        rag_context = rag_service.build_context(content, max_tokens=1500)
+    # Fetch all context in parallel (Lanyard, RAG, User Memory, Sentiment)
+    context = await _fetch_all_context(user_id, content)
+    dev_activities = context["dev_activity"]
+    rag_context = context["rag_context"]
+    user_context = context["user_context"]
+    sentiment_context = context["sentiment_context"]
 
     # Fallback to basic server context if RAG not available
     if not rag_context:
         rag_context = server_intel.get_server_context()
+
+    # Combine all context
+    combined_context = rag_context
+    if user_context:
+        combined_context = f"{combined_context}\n\n{user_context}" if combined_context else user_context
+    if sentiment_context:
+        combined_context = f"{combined_context}\n\n{sentiment_context}" if combined_context else sentiment_context
+
+    # Detect input language for verification
+    input_language = _detect_language(content)
 
     # Generate AI response with conversation history
     try:
@@ -502,8 +638,29 @@ async def _handle_conversation_reply(bot: discord.Client, message: discord.Messa
                 user_name=user_name,
                 dev_activity=dev_activities,
                 conversation_history=conv["messages"],
-                server_context=rag_context,
+                server_context=combined_context,
             )
+
+        if response:
+            # Verify language match
+            lang_matches, input_lang, response_lang = _verify_language_match(content, response)
+            if not lang_matches:
+                log.tree("Language Mismatch (Reply)", [
+                    ("Input", input_lang),
+                    ("Response", response_lang),
+                    ("Action", "Regenerating"),
+                ], emoji="🌐")
+
+                # Regenerate with explicit language instruction
+                lang_instruction = f"CRITICAL: The user wrote in {input_lang.upper()}. You MUST respond ENTIRELY in {input_lang.upper()}."
+
+                response = await ai_service.chat(
+                    message=content,
+                    user_name=user_name,
+                    dev_activity=dev_activities,
+                    conversation_history=conv["messages"],
+                    server_context=f"{combined_context}\n\n{lang_instruction}",
+                )
 
         if response:
             if len(response) > 2000:
@@ -702,8 +859,12 @@ async def on_automod_action(bot: discord.Client, execution: discord.AutoModActio
             ])
         return
 
-    # Get developer's current activities for context
-    dev_activities = await _get_developer_activity_context()
+    # Fetch all context in parallel (Lanyard, RAG, User Memory, Sentiment)
+    context = await _fetch_all_context(user_id, cleaned_content)
+    dev_activities = context["dev_activity"]
+    rag_context = context["rag_context"]
+    user_context = context["user_context"]
+    sentiment_context = context["sentiment_context"]
 
     # Get ping history context
     ping_context = _get_ping_context(user_id, cleaned_content)
@@ -717,15 +878,13 @@ async def on_automod_action(bot: discord.Client, execution: discord.AutoModActio
     # Check for repeated questions from this user
     repeated_context = _get_repeated_question_context(user_id, cleaned_content)
 
-    # Get RAG context (semantic search) - this replaces the old server_intel approach
-    rag_context = ""
-    if rag_service.is_available:
-        rag_context = rag_service.build_context(cleaned_content, max_tokens=1500)
-
     # Fallback to basic server context if RAG not available
     server_context = ""
     if not rag_context:
         server_context = server_intel.get_server_context()
+
+    # Detect input language for verification later
+    input_language = _detect_language(cleaned_content)
 
     log.tree("Generating AI Response", [
         ("Original Message", content[:80] + "..." if len(content) > 80 else content),
@@ -735,11 +894,21 @@ async def on_automod_action(bot: discord.Client, execution: discord.AutoModActio
         ("Intent", intent_context[:30] + "..." if intent_context else "Unclear"),
         ("Repeated", repeated_context[:30] + "..." if repeated_context else "No"),
         ("RAG Context", "Yes" if rag_context else "No"),
+        ("User Memory", "Yes" if user_context else "No"),
+        ("Sentiment", sentiment_context[:30] + "..." if sentiment_context else "Neutral"),
+        ("Input Language", input_language),
     ], emoji="🤖")
 
     # Get existing conversation history (for multi-turn)
     conv = _get_conversation(user_id)
     conversation_history = conv["messages"] if conv else None
+
+    # Combine all context into server_context
+    combined_context = rag_context or server_context
+    if user_context:
+        combined_context = f"{combined_context}\n\n{user_context}" if combined_context else user_context
+    if sentiment_context:
+        combined_context = f"{combined_context}\n\n{sentiment_context}" if combined_context else sentiment_context
 
     # Generate AI response
     try:
@@ -751,11 +920,44 @@ async def on_automod_action(bot: discord.Client, execution: discord.AutoModActio
                 dev_activity=dev_activities,
                 ping_context=ping_context,
                 conversation_history=conversation_history,
-                server_context=rag_context or server_context,  # RAG context preferred
+                server_context=combined_context,
                 time_context=time_context,
                 intent_context=intent_context,
                 repeated_context=repeated_context,
             )
+
+        if response:
+            # Verify language match
+            lang_matches, input_lang, response_lang = _verify_language_match(cleaned_content, response)
+            if not lang_matches:
+                log.tree("Language Mismatch Detected", [
+                    ("Input", input_lang),
+                    ("Response", response_lang),
+                    ("Action", "Regenerating"),
+                ], emoji="🌐")
+
+                # Add explicit language instruction and regenerate
+                lang_instruction = f"CRITICAL: The user wrote in {input_lang.upper()}. You MUST respond ENTIRELY in {input_lang.upper()}. Do not mix languages."
+
+                response = await ai_service.chat(
+                    message=cleaned_content,
+                    user_name=user_name,
+                    original_blocked=content,
+                    dev_activity=dev_activities,
+                    ping_context=ping_context,
+                    conversation_history=conversation_history,
+                    server_context=f"{combined_context}\n\n{lang_instruction}",
+                    time_context=time_context,
+                    intent_context=intent_context,
+                    repeated_context=repeated_context,
+                )
+
+                # Log regeneration result
+                if response:
+                    _, _, new_response_lang = _verify_language_match(cleaned_content, response)
+                    log.tree("Language Regeneration Complete", [
+                        ("New Response Lang", new_response_lang),
+                    ], emoji="✅")
 
         if response:
             if len(response) > 2000:
