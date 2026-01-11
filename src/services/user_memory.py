@@ -28,9 +28,13 @@ class UserMemory:
     - Topics they frequently ask about
     - Sentiment patterns (frequently frustrated?)
     - Interaction count
+
+    Memory-optimized: limits max users and evicts least-recently-used.
     """
 
     DATA_FILE = Path(__file__).parent.parent.parent / "data" / "user_memory.json"
+    MAX_USERS = 200  # Max users to keep in memory
+    EVICT_COUNT = 20  # Number to evict when limit reached
 
     # Topic keywords to detect
     TOPIC_KEYWORDS = {
@@ -93,6 +97,9 @@ class UserMemory:
     def _get_user(self, user_id: int) -> dict:
         """Get or create user memory entry."""
         if user_id not in self._memory:
+            # Check if we need to evict old users
+            self._evict_if_needed()
+
             self._memory[user_id] = {
                 "topics": defaultdict(int),
                 "frustration_count": 0,
@@ -101,6 +108,28 @@ class UserMemory:
                 "last_interaction": 0,
             }
         return self._memory[user_id]
+
+    def _evict_if_needed(self) -> None:
+        """Evict least-recently-used users if at capacity."""
+        if len(self._memory) < self.MAX_USERS:
+            return
+
+        # Sort by last_interaction (oldest first)
+        sorted_users = sorted(
+            self._memory.items(),
+            key=lambda x: x[1].get("last_interaction", 0)
+        )
+
+        # Evict oldest users
+        evicted = 0
+        for user_id, _ in sorted_users[:self.EVICT_COUNT]:
+            del self._memory[user_id]
+            evicted += 1
+
+        log.tree("User Memory Eviction", [
+            ("Evicted", str(evicted)),
+            ("Remaining", str(len(self._memory))),
+        ], emoji="🧹")
 
     def record_interaction(self, user_id: int, message: str) -> None:
         """
