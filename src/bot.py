@@ -5,6 +5,7 @@ TrippixnBot - Main Bot
 Personal Discord bot for portfolio stats and utilities.
 
 Author: حَـــــنَّـــــا
+Server: discord.gg/syria
 """
 
 import os
