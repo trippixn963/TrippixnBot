@@ -1,6 +1,6 @@
 """
 TrippixnBot - Custom Exceptions
-==============================
+===============================
 
 Custom exception classes for better error handling and categorization.
 

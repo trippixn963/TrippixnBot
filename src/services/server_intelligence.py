@@ -1,6 +1,6 @@
 """
 TrippixnBot - Server Intelligence Service
-==========================================
+=========================================
 
 Builds comprehensive understanding of the server:
 - Channels, roles, categories
