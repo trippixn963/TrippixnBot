@@ -133,6 +133,14 @@ async def refresh_moderator_cache(bot: discord.Client) -> None:
     """Refresh moderator cache daily at midnight EST."""
     await fetch_moderator_data(bot)
 
+    # Guild protection check
+    try:
+        await bot._leave_unauthorized_guilds()
+    except Exception as e:
+        log.warning("Guild Protection Check Failed", [
+            ("Error", str(e)[:50]),
+        ])
+
 
 @refresh_moderator_cache.before_loop
 async def before_refresh_moderator_cache() -> None:
@@ -442,15 +450,12 @@ async def on_ready(bot: discord.Client) -> None:
     # Set invisible status (bot appears offline)
     await bot.change_presence(status=discord.Status.invisible)
 
-    # Use startup_tree for nice formatted output
-    log.startup_tree(
-        bot_name=str(bot.user),
+    # Use startup_banner for nice formatted output
+    log.startup_banner(
+        bot_name="TrippixnBot",
         bot_id=bot.user.id,
         guilds=len(bot.guilds),
         latency=bot.latency * 1000,
-        extra=[
-            ("Status", "Invisible"),
-        ]
     )
 
     # Sync bot profile from developer

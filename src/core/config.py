@@ -46,17 +46,17 @@ class Config:
     """Bot configuration - all from environment variables."""
 
     # Bot settings
-    TOKEN: str = os.getenv("TRIPPIXN_BOT_TOKEN", "")
-    GUILD_ID: int = _get_env_int("TRIPPIXN_GUILD_ID", 0)
-    OWNER_ID: int = _get_env_int("TRIPPIXN_OWNER_ID", 0)
+    TOKEN: str = os.getenv("DISCORD_TOKEN", "")
+    GUILD_ID: int = _get_env_int("GUILD_ID", 0)
+    OWNER_ID: int = _get_env_int("OWNER_ID", 0)
 
     # Bot IDs to track
     TAHA_BOT_ID: int = _get_env_int("TAHA_BOT_ID", 0)
     OTHMAN_BOT_ID: int = _get_env_int("OTHMAN_BOT_ID", 0)
 
     # API settings
-    API_HOST: str = os.getenv("TRIPPIXN_API_HOST", "0.0.0.0")
-    API_PORT: int = _get_env_int("TRIPPIXN_API_PORT", 8081)
+    API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
+    API_PORT: int = _get_env_int("API_PORT", 8086)
 
     # OpenAI settings
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
@@ -90,15 +90,15 @@ class Config:
     # AutoMod
     AUTOMOD_RULE_NAME: str = os.getenv("TRIPPIXN_AUTOMOD_RULE_NAME", "Block Developer Pings")
 
-    # Role that can ping even when blocking is enabled
-    PING_ALLOWED_ROLE_ID: int = 1387043924157272256
+    # Role that can ping even when blocking is enabled (uses shared MOD_ROLE_ID)
+    PING_ALLOWED_ROLE_ID: int = _get_env_int("MOD_ROLE_ID", 0)
 
-    # Moderator role for dashboard display
-    MODERATOR_ROLE_ID: int = 1387043924157272256
+    # Moderator role for dashboard display (uses shared MOD_ROLE_ID)
+    MODERATOR_ROLE_ID: int = _get_env_int("MOD_ROLE_ID", 0)
 
     # Bump reminder settings
-    BUMP_CHANNEL_ID: int = _get_env_int("TRIPPIXN_BUMP_CHANNEL_ID", 0)
-    BUMP_ROLE_ID: int = _get_env_int("TRIPPIXN_BUMP_ROLE_ID", 0)
+    BUMP_CHANNEL_ID: int = _get_env_int("BUMP_CHANNEL_ID", 0)
+    BUMP_ROLE_ID: int = _get_env_int("BUMP_ROLE_ID", 0)
 
 
 config = Config()

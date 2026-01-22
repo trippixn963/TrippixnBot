@@ -7,6 +7,7 @@ Personal Discord bot for portfolio stats and utilities.
 Author: حَـــــنَّـــــا
 """
 
+import os
 import asyncio
 import sys
 import traceback
@@ -14,6 +15,7 @@ import discord
 from discord.ext import commands
 
 from src.core import config, log
+from src.core.health import HealthCheckServer
 from src.services import StatsAPI, server_intel, rag_service, auto_learner, style_learner, feedback_learner
 from src.services.bump_service import bump_service
 from src.handlers import on_ready, on_presence_update, on_message, on_automod_action
@@ -74,6 +76,24 @@ def setup_asyncio_exception_handler(loop: asyncio.AbstractEventLoop) -> None:
 
 
 # =============================================================================
+# Guild Protection
+# =============================================================================
+
+def _get_authorized_guilds() -> set:
+    """Get authorized guild IDs from environment."""
+    guilds = set()
+    syria_id = os.getenv("GUILD_ID")
+    mods_id = os.getenv("MODS_GUILD_ID")
+    if syria_id:
+        guilds.add(int(syria_id))
+    if mods_id:
+        guilds.add(int(mods_id))
+    return guilds
+
+AUTHORIZED_GUILD_IDS = _get_authorized_guilds()
+
+
+# =============================================================================
 # Bot Setup
 # =============================================================================
 
@@ -95,6 +115,8 @@ class TrippixnBot(commands.Bot):
         )
 
         self.stats_api = StatsAPI()
+        self.stats_api.set_bot(self)
+        self.health_server = HealthCheckServer(self)
 
         # Set up app command error handler
         self.tree.on_error = self._on_app_command_error
@@ -185,6 +207,29 @@ class TrippixnBot(commands.Bot):
         # Start shared HTTP session
         await http_session.start()
 
+        # Start health check server (unified) with system health callback
+        import psutil
+        _psutil_process = psutil.Process()
+
+        async def system_health() -> dict:
+            cpu_percent = psutil.cpu_percent(interval=None)
+            memory = psutil.virtual_memory()
+            disk = psutil.disk_usage("/")
+            bot_memory_mb = _psutil_process.memory_info().rss / (1024 * 1024)
+            return {
+                "cpu_percent": cpu_percent,
+                "memory_percent": memory.percent,
+                "disk_percent": disk.percent,
+                "disk_total_gb": round(disk.total / (1024 ** 3), 1),
+                "disk_used_gb": round(disk.used / (1024 ** 3), 1),
+                "bot_memory_mb": round(bot_memory_mb, 1),
+                "threads": _psutil_process.num_threads(),
+                "open_files": len(_psutil_process.open_files()),
+            }
+
+        self.health_server.register_system(system_health)
+        await self.health_server.start()
+
         # Start stats API server
         await self.stats_api.start()
 
@@ -208,6 +253,9 @@ class TrippixnBot(commands.Bot):
     async def on_ready(self) -> None:
         """Handle ready event."""
         await on_ready(self)
+
+        # Leave unauthorized guilds first
+        await self._leave_unauthorized_guilds()
 
         # Initialize server intelligence (only once, not on reconnects)
         if config.GUILD_ID and not server_intel._initialized:
@@ -273,6 +321,58 @@ class TrippixnBot(commands.Bot):
                     ("Emoji", emoji),
                     ("Type", "Positive" if feedback.is_positive else "Negative"),
                 ], emoji="📊")
+
+    # =========================================================================
+    # Guild Protection
+    # =========================================================================
+
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        """Leave immediately if guild is not authorized."""
+        # Safety: Don't leave if authorized set is empty (misconfigured env)
+        if not AUTHORIZED_GUILD_IDS:
+            return
+        if guild.id not in AUTHORIZED_GUILD_IDS:
+            log.warning("Added To Unauthorized Guild - Leaving", [
+                ("Guild", guild.name),
+                ("ID", str(guild.id)),
+            ])
+            try:
+                await guild.leave()
+            except Exception as e:
+                log.error("Failed To Leave Unauthorized Guild", [
+                    ("Guild", guild.name),
+                    ("Error", str(e)),
+                ])
+
+    async def _leave_unauthorized_guilds(self) -> None:
+        """Leave any guilds not in AUTHORIZED_GUILD_IDS."""
+        # Safety: Don't leave any guilds if authorized set is empty (misconfigured env)
+        if not AUTHORIZED_GUILD_IDS:
+            log.warning("Guild Protection Skipped", [
+                ("Reason", "AUTHORIZED_GUILD_IDS is empty"),
+                ("Action", "Check GUILD_ID and MODS_GUILD_ID in .env"),
+            ])
+            return
+        unauthorized = [g for g in self.guilds if g.id not in AUTHORIZED_GUILD_IDS]
+        if not unauthorized:
+            return
+
+        log.tree("Leaving Unauthorized Guilds", [
+            ("Count", str(len(unauthorized))),
+        ], emoji="⚠️")
+
+        for guild in unauthorized:
+            try:
+                log.warning("Leaving Unauthorized Guild", [
+                    ("Guild", guild.name),
+                    ("ID", str(guild.id)),
+                ])
+                await guild.leave()
+            except Exception as e:
+                log.error("Failed To Leave Guild", [
+                    ("Guild", guild.name),
+                    ("Error", str(e)),
+                ])
 
     async def close(self) -> None:
         """Clean shutdown."""

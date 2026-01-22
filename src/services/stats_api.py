@@ -301,9 +301,7 @@ async def handle_commits_increment(request: web.Request) -> web.Response:
     )
 
 
-async def handle_health(request: web.Request) -> web.Response:
-    """GET /health - Health check endpoint."""
-    return web.json_response({"status": "healthy"})
+# handle_health moved to StatsAPI.handle_health method for bot access
 
 
 # Discord User ID for avatar endpoint
@@ -362,7 +360,9 @@ async def handle_avatar(request: web.Request) -> web.Response:
 class StatsAPI:
     """Stats API server."""
 
-    def __init__(self):
+    def __init__(self, bot=None):
+        self._bot = bot
+        self._start_time: Optional[datetime] = None
         self.app = web.Application(middlewares=[
             rate_limit_middleware,
             security_headers_middleware,
@@ -371,12 +371,52 @@ class StatsAPI:
         self._cleanup_task: Optional[asyncio.Task] = None
         self._setup_routes()
 
+    def set_bot(self, bot) -> None:
+        """Set bot reference after initialization."""
+        self._bot = bot
+
     def _setup_routes(self) -> None:
         """Configure API routes."""
         self.app.router.add_get("/api/stats", handle_stats)
         self.app.router.add_post("/api/commits/increment", handle_commits_increment)
         self.app.router.add_get("/avatar", handle_avatar)
-        self.app.router.add_get("/health", handle_health)
+        # /health removed - now served by unified HealthCheckServer on port 8087
+
+    async def handle_health(self, request: web.Request) -> web.Response:
+        """GET /health - Health check endpoint with full status."""
+        from zoneinfo import ZoneInfo
+        EST_TZ = ZoneInfo("America/New_York")
+
+        now = datetime.now(EST_TZ)
+        start = self._start_time or now
+        uptime_seconds = (now - start).total_seconds()
+
+        # Format uptime as human-readable
+        hours, remainder = divmod(int(uptime_seconds), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        uptime_str = f"{hours}h {minutes}m {seconds}s"
+
+        # Get bot status
+        is_ready = self._bot.is_ready() if self._bot else False
+        latency_ms = round(self._bot.latency * 1000) if self._bot and is_ready else None
+
+        status = {
+            "status": "healthy" if is_ready else "starting",
+            "bot": "TrippixnBot",
+            "run_id": getattr(log, "run_id", None),
+            "uptime": uptime_str,
+            "uptime_seconds": int(uptime_seconds),
+            "started_at": start.isoformat(),
+            "timestamp": now.isoformat(),
+            "timezone": "America/New_York (EST)",
+            "discord": {
+                "connected": is_ready,
+                "latency_ms": latency_ms,
+                "guilds": len(self._bot.guilds) if self._bot and is_ready else 0,
+            },
+        }
+
+        return web.json_response(status)
 
     async def _periodic_cleanup(self) -> None:
         """Periodically cleanup rate limiter stale entries."""
@@ -386,6 +426,9 @@ class StatsAPI:
 
     async def start(self) -> None:
         """Start the API server."""
+        from zoneinfo import ZoneInfo
+        self._start_time = datetime.now(ZoneInfo("America/New_York"))
+
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
 
