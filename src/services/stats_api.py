@@ -152,7 +152,7 @@ class StatsStore:
             log.warning(f"Failed to save commits cache: {e}")
 
     async def fetch_github_commits(self) -> int:
-        """Fetch total commits this year from GitHub using GraphQL API (single request)."""
+        """Fetch total commits and contribution calendar from GitHub using GraphQL API."""
         username = config.GITHUB_USERNAME
         token = config.GITHUB_TOKEN
 
@@ -164,13 +164,23 @@ class StatsStore:
             log.warning("GITHUB_TOKEN not set - required for GraphQL API")
             return self._stats["commits"].get("this_year", 0)
 
-        # GraphQL query to get contribution calendar
+        # GraphQL query to get contribution calendar with daily data
         query = """
         query($username: String!, $from: DateTime!, $to: DateTime!) {
             user(login: $username) {
                 contributionsCollection(from: $from, to: $to) {
                     totalCommitContributions
                     restrictedContributionsCount
+                    contributionCalendar {
+                        totalContributions
+                        weeks {
+                            contributionDays {
+                                date
+                                contributionCount
+                                contributionLevel
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -216,11 +226,26 @@ class StatsStore:
                     private_commits = contributions.get("restrictedContributionsCount", 0)
                     total_commits = public_commits + private_commits
 
+                    # Extract contribution calendar for the graph
+                    calendar = contributions.get("contributionCalendar", {})
+                    weeks = calendar.get("weeks", [])
+
+                    # Flatten to list of {date, count, level}
+                    contribution_days = []
+                    for week in weeks:
+                        for day in week.get("contributionDays", []):
+                            contribution_days.append({
+                                "date": day.get("date"),
+                                "count": day.get("contributionCount", 0),
+                                "level": day.get("contributionLevel", "NONE"),
+                            })
+
                     # Update stats
                     async with self._lock:
                         self._stats["commits"]["this_year"] = total_commits
                         self._stats["commits"]["year_start"] = year_start.strftime("%Y-%m-%d")
                         self._stats["commits"]["last_fetched"] = now.isoformat()
+                        self._stats["commits"]["calendar"] = contribution_days
                         self._save_commits()
 
                     log.success(f"GitHub commits updated: {total_commits} commits in {now.year} (GraphQL)")
