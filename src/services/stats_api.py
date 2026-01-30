@@ -10,6 +10,7 @@ Author: حَـــــنَّـــــا
 import asyncio
 import json
 import os
+import re
 import time
 import aiohttp
 from collections import defaultdict
@@ -95,7 +96,7 @@ rate_limiter = RateLimiter(requests_per_minute=60, burst_limit=10)
 # =============================================================================
 
 class StatsStore:
-    """Thread-safe stats storage."""
+    """Thread-safe stats storage with GitHub commit tracking."""
 
     def __init__(self):
         self._stats: dict = {
@@ -120,55 +121,129 @@ class StatsStore:
             },
             "developer": {"status": "offline", "avatar": None, "banner": None, "decoration": None, "activities": []},
             "commits": {
-                "this_week": 266,  # Baseline, never resets
-                "week_start": None,
+                "this_year": 0,
+                "year_start": None,
+                "last_fetched": None,
             },
             "updated_at": None,
         }
         self._lock = asyncio.Lock()
         self._commits_file = "/root/TrippixnBot/data/commits.json"
+        self._github_task: Optional[asyncio.Task] = None
         self._load_commits()
 
     def _load_commits(self) -> None:
-        """Load commits from file."""
+        """Load cached commits from file."""
         try:
             if os.path.exists(self._commits_file):
                 with open(self._commits_file, "r") as f:
                     data = json.load(f)
                     self._stats["commits"] = data
-                    # Check if we need to reset for new week (Monday)
-                    self._check_week_reset()
         except Exception as e:
-            log.warning(f"Failed to load commits: {e}")
+            log.warning(f"Failed to load commits cache: {e}")
 
     def _save_commits(self) -> None:
-        """Save commits to file."""
+        """Save commits to cache file."""
         try:
             os.makedirs(os.path.dirname(self._commits_file), exist_ok=True)
             with open(self._commits_file, "w") as f:
                 json.dump(self._stats["commits"], f)
         except Exception as e:
-            log.warning(f"Failed to save commits: {e}")
+            log.warning(f"Failed to save commits cache: {e}")
 
-    def _check_week_reset(self) -> None:
-        """Check week - baseline is 266, never resets to 0."""
-        today = datetime.now()
-        # Get start of current week (Monday)
-        days_since_monday = today.weekday()
-        week_start = (today - timedelta(days=days_since_monday)).strftime("%Y-%m-%d")
+    async def fetch_github_commits(self) -> int:
+        """Fetch total commits this year from GitHub across all repos."""
+        username = config.GITHUB_USERNAME
+        token = config.GITHUB_TOKEN
 
-        # Only update week_start, never reset the count (baseline is 266)
-        if self._stats["commits"].get("week_start") != week_start:
-            self._stats["commits"]["week_start"] = week_start
-            self._save_commits()
+        if not username:
+            log.warning("GITHUB_USERNAME not set")
+            return self._stats["commits"].get("this_year", 0)
 
-    async def increment_commits(self, count: int = 1) -> int:
-        """Increment commit count and return new total."""
-        async with self._lock:
-            self._check_week_reset()
-            self._stats["commits"]["this_week"] += count
-            self._save_commits()
-            return self._stats["commits"]["this_week"]
+        headers = {
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "TrippixnBot",
+        }
+        if token:
+            headers["Authorization"] = f"token {token}"
+
+        year_start = datetime(datetime.now().year, 1, 1).strftime("%Y-%m-%d")
+        total_commits = 0
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Get all repos for the user
+                repos = []
+                page = 1
+                while True:
+                    url = f"https://api.github.com/users/{username}/repos?per_page=100&page={page}"
+                    async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                        if resp.status != 200:
+                            log.warning(f"GitHub repos API error: {resp.status}")
+                            break
+                        data = await resp.json()
+                        if not data:
+                            break
+                        repos.extend(data)
+                        page += 1
+                        if len(data) < 100:
+                            break
+
+                # Count commits in each repo for this year
+                for repo in repos:
+                    repo_name = repo["full_name"]
+                    commits_url = f"https://api.github.com/repos/{repo_name}/commits?author={username}&since={year_start}T00:00:00Z&per_page=1"
+
+                    async with session.get(commits_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                        if resp.status == 200:
+                            # GitHub returns total count in Link header for pagination
+                            link_header = resp.headers.get("Link", "")
+                            if 'rel="last"' in link_header:
+                                # Extract page number from last link
+                                import re
+                                match = re.search(r'page=(\d+)>; rel="last"', link_header)
+                                if match:
+                                    total_commits += int(match.group(1))
+                            else:
+                                # No pagination, count items in response
+                                data = await resp.json()
+                                total_commits += len(data)
+
+                # Update stats
+                async with self._lock:
+                    self._stats["commits"]["this_year"] = total_commits
+                    self._stats["commits"]["year_start"] = year_start
+                    self._stats["commits"]["last_fetched"] = datetime.now().isoformat()
+                    self._save_commits()
+
+                log.success(f"GitHub commits updated: {total_commits} commits in {datetime.now().year}")
+                return total_commits
+
+        except Exception as e:
+            log.warning(f"Failed to fetch GitHub commits: {e}")
+            return self._stats["commits"].get("this_year", 0)
+
+    async def start_github_polling(self) -> None:
+        """Start background task to periodically fetch GitHub commits."""
+        async def poll_loop():
+            while True:
+                await self.fetch_github_commits()
+                # Update every hour (GitHub API rate limit is 5000/hour with token)
+                await asyncio.sleep(3600)
+
+        # Fetch immediately on startup
+        await self.fetch_github_commits()
+        # Then start the polling loop
+        self._github_task = asyncio.create_task(poll_loop())
+
+    async def stop_github_polling(self) -> None:
+        """Stop the GitHub polling task."""
+        if self._github_task:
+            self._github_task.cancel()
+            try:
+                await self._github_task
+            except asyncio.CancelledError:
+                pass
 
     async def update(self, **kwargs) -> None:
         """Update stats."""
@@ -183,7 +258,6 @@ class StatsStore:
     async def get(self) -> dict:
         """Get current stats (async)."""
         async with self._lock:
-            self._check_week_reset()
             return self._stats.copy()
 
     def get_stats(self) -> dict:
@@ -274,8 +348,8 @@ async def handle_stats(request: web.Request) -> web.Response:
     })
 
 
-async def handle_commits_increment(request: web.Request) -> web.Response:
-    """POST /api/commits/increment - Increment commit count (requires API key)."""
+async def handle_commits_refresh(request: web.Request) -> web.Response:
+    """POST /api/commits/refresh - Manually refresh GitHub commit count (requires API key)."""
     # Verify API key
     api_key = request.headers.get("X-API-Key")
     expected_key = os.environ.get("COMMITS_API_KEY", "")
@@ -287,16 +361,11 @@ async def handle_commits_increment(request: web.Request) -> web.Response:
             headers={"Access-Control-Allow-Origin": "*"}
         )
 
-    try:
-        data = await request.json()
-        count = data.get("count", 1)
-    except Exception:
-        count = 1
-
-    new_total = await stats_store.increment_commits(count)
+    # Fetch fresh commit count from GitHub
+    new_total = await stats_store.fetch_github_commits()
 
     return web.json_response(
-        {"commits_this_week": new_total},
+        {"commits_this_year": new_total},
         headers={"Access-Control-Allow-Origin": "*"}
     )
 
@@ -378,7 +447,7 @@ class StatsAPI:
     def _setup_routes(self) -> None:
         """Configure API routes."""
         self.app.router.add_get("/api/stats", handle_stats)
-        self.app.router.add_post("/api/commits/increment", handle_commits_increment)
+        self.app.router.add_post("/api/commits/refresh", handle_commits_refresh)
         self.app.router.add_get("/avatar", handle_avatar)
         # /health removed - now served by unified HealthCheckServer on port 8087
 
@@ -442,11 +511,15 @@ class StatsAPI:
         # Start periodic cleanup task
         self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
 
+        # Start GitHub commit polling
+        await stats_store.start_github_polling()
+
         log.tree("Stats API Started", [
             ("Host", config.API_HOST),
             ("Port", config.API_PORT),
             ("Endpoints", "/api/stats, /health"),
             ("Rate Limit", "60 req/min, 10 burst"),
+            ("GitHub", f"Tracking @{config.GITHUB_USERNAME}"),
         ], emoji="🌐")
 
     async def stop(self) -> None:
@@ -458,6 +531,9 @@ class StatsAPI:
                 await self._cleanup_task
             except asyncio.CancelledError:
                 pass
+
+        # Stop GitHub polling
+        await stats_store.stop_github_polling()
 
         if self.runner:
             await self.runner.cleanup()
