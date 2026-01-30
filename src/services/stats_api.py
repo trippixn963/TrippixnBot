@@ -152,7 +152,7 @@ class StatsStore:
             log.warning(f"Failed to save commits cache: {e}")
 
     async def fetch_github_commits(self) -> int:
-        """Fetch total commits this year from GitHub across all repos."""
+        """Fetch total commits this year from GitHub using GraphQL API (single request)."""
         username = config.GITHUB_USERNAME
         token = config.GITHUB_TOKEN
 
@@ -160,64 +160,71 @@ class StatsStore:
             log.warning("GITHUB_USERNAME not set")
             return self._stats["commits"].get("this_year", 0)
 
-        headers = {
-            "Accept": "application/vnd.github.v3+json",
-            "User-Agent": "TrippixnBot",
-        }
-        if token:
-            headers["Authorization"] = f"token {token}"
+        if not token:
+            log.warning("GITHUB_TOKEN not set - required for GraphQL API")
+            return self._stats["commits"].get("this_year", 0)
 
-        year_start = datetime(datetime.now().year, 1, 1).strftime("%Y-%m-%d")
-        total_commits = 0
+        # GraphQL query to get contribution calendar
+        query = """
+        query($username: String!, $from: DateTime!, $to: DateTime!) {
+            user(login: $username) {
+                contributionsCollection(from: $from, to: $to) {
+                    totalCommitContributions
+                    restrictedContributionsCount
+                }
+            }
+        }
+        """
+
+        now = datetime.now()
+        year_start = datetime(now.year, 1, 1)
+
+        variables = {
+            "username": username,
+            "from": year_start.isoformat() + "Z",
+            "to": now.isoformat() + "Z",
+        }
+
+        headers = {
+            "Authorization": f"bearer {token}",
+            "Content-Type": "application/json",
+        }
 
         try:
             async with aiohttp.ClientSession() as session:
-                # Get all repos for the user
-                repos = []
-                page = 1
-                while True:
-                    url = f"https://api.github.com/users/{username}/repos?per_page=100&page={page}"
-                    async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                        if resp.status != 200:
-                            log.warning(f"GitHub repos API error: {resp.status}")
-                            break
-                        data = await resp.json()
-                        if not data:
-                            break
-                        repos.extend(data)
-                        page += 1
-                        if len(data) < 100:
-                            break
+                async with session.post(
+                    "https://api.github.com/graphql",
+                    json={"query": query, "variables": variables},
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status != 200:
+                        log.warning(f"GitHub GraphQL API error: {resp.status}")
+                        return self._stats["commits"].get("this_year", 0)
 
-                # Count commits in each repo for this year
-                for repo in repos:
-                    repo_name = repo["full_name"]
-                    commits_url = f"https://api.github.com/repos/{repo_name}/commits?author={username}&since={year_start}T00:00:00Z&per_page=1"
+                    data = await resp.json()
 
-                    async with session.get(commits_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                        if resp.status == 200:
-                            # GitHub returns total count in Link header for pagination
-                            link_header = resp.headers.get("Link", "")
-                            if 'rel="last"' in link_header:
-                                # Extract page number from last link
-                                import re
-                                match = re.search(r'page=(\d+)>; rel="last"', link_header)
-                                if match:
-                                    total_commits += int(match.group(1))
-                            else:
-                                # No pagination, count items in response
-                                data = await resp.json()
-                                total_commits += len(data)
+                    if "errors" in data:
+                        log.warning(f"GitHub GraphQL error: {data['errors']}")
+                        return self._stats["commits"].get("this_year", 0)
 
-                # Update stats
-                async with self._lock:
-                    self._stats["commits"]["this_year"] = total_commits
-                    self._stats["commits"]["year_start"] = year_start
-                    self._stats["commits"]["last_fetched"] = datetime.now().isoformat()
-                    self._save_commits()
+                    user_data = data.get("data", {}).get("user", {})
+                    contributions = user_data.get("contributionsCollection", {})
 
-                log.success(f"GitHub commits updated: {total_commits} commits in {datetime.now().year}")
-                return total_commits
+                    # Total commits = public + private (restricted)
+                    public_commits = contributions.get("totalCommitContributions", 0)
+                    private_commits = contributions.get("restrictedContributionsCount", 0)
+                    total_commits = public_commits + private_commits
+
+                    # Update stats
+                    async with self._lock:
+                        self._stats["commits"]["this_year"] = total_commits
+                        self._stats["commits"]["year_start"] = year_start.strftime("%Y-%m-%d")
+                        self._stats["commits"]["last_fetched"] = now.isoformat()
+                        self._save_commits()
+
+                    log.success(f"GitHub commits updated: {total_commits} commits in {now.year} (GraphQL)")
+                    return total_commits
 
         except Exception as e:
             log.warning(f"Failed to fetch GitHub commits: {e}")
