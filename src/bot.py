@@ -297,31 +297,31 @@ class TrippixnBot(commands.Bot):
         await on_message(self, message)
         await self.process_commands(message)
 
-    async def on_automod_action(self, execution: discord.AutoModAction) -> None:
-        """Handle AutoMod actions - respond when developer ping is blocked."""
-        await on_automod_action(self, execution)
+    # async def on_automod_action(self, execution: discord.AutoModAction) -> None:
+    #     """Handle AutoMod actions - respond when developer ping is blocked."""
+    #     await on_automod_action(self, execution)
 
-    async def on_reaction_add(self, reaction: discord.Reaction, user: discord.User) -> None:
-        """Handle reactions to bot messages for feedback learning."""
-        # Skip bot reactions
-        if user.bot:
-            return
-
-        # Check if this is a reaction to a tracked bot message
-        message_id = reaction.message.id
-        if feedback_learner.is_bot_message(message_id):
-            emoji = str(reaction.emoji)
-            feedback = feedback_learner.record_reaction(
-                message_id=message_id,
-                user_id=user.id,
-                emoji=emoji,
-            )
-            if feedback:
-                log.tree("Reaction Feedback", [
-                    ("User", str(user)),
-                    ("Emoji", emoji),
-                    ("Type", "Positive" if feedback.is_positive else "Negative"),
-                ], emoji="📊")
+    # async def on_reaction_add(self, reaction: discord.Reaction, user: discord.User) -> None:
+    #     """Handle reactions to bot messages for feedback learning."""
+    #     # Skip bot reactions
+    #     if user.bot:
+    #         return
+    #
+    #     # Check if this is a reaction to a tracked bot message
+    #     message_id = reaction.message.id
+    #     if feedback_learner.is_bot_message(message_id):
+    #         emoji = str(reaction.emoji)
+    #         feedback = feedback_learner.record_reaction(
+    #             message_id=message_id,
+    #             user_id=user.id,
+    #             emoji=emoji,
+    #         )
+    #         if feedback:
+    #             log.tree("Reaction Feedback", [
+    #                 ("User", str(user)),
+    #                 ("Emoji", emoji),
+    #                 ("Type", "Positive" if feedback.is_positive else "Negative"),
+    #             ], emoji="📊")
 
     # =========================================================================
     # Guild Protection
