@@ -45,8 +45,8 @@ def _get_env_int(key: str, default: int) -> int:
 class Config:
     """Bot configuration - all from environment variables."""
 
-    # Bot settings
-    TOKEN: str = os.getenv("DISCORD_TOKEN", "")
+    # Bot settings (bot-specific uses prefix)
+    TOKEN: str = os.getenv("TRIPPIXN_TOKEN", "")
     GUILD_ID: int = _get_env_int("GUILD_ID", 0)
     OWNER_ID: int = _get_env_int("OWNER_ID", 0)
 
@@ -54,9 +54,9 @@ class Config:
     TAHA_BOT_ID: int = _get_env_int("TAHA_BOT_ID", 0)
     OTHMAN_BOT_ID: int = _get_env_int("OTHMAN_BOT_ID", 0)
 
-    # API settings
-    API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
-    API_PORT: int = _get_env_int("API_PORT", 8086)
+    # API settings (unified port for /health and /api/*)
+    API_HOST: str = os.getenv("TRIPPIXN_API_HOST", "0.0.0.0")
+    API_PORT: int = _get_env_int("TRIPPIXN_API_PORT", 8085)
 
     # OpenAI settings
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
