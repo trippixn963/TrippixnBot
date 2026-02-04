@@ -16,9 +16,7 @@ import discord
 from discord.ext import commands
 
 from src.core import config, log
-from src.core.health import HealthCheckServer
 from src.services import StatsAPI, server_intel, rag_service, auto_learner, style_learner, feedback_learner
-from src.services.bump_service import bump_service
 from src.handlers import on_ready, on_presence_update, on_message, on_automod_action
 from src.utils import http_session
 
@@ -117,7 +115,6 @@ class TrippixnBot(commands.Bot):
 
         self.stats_api = StatsAPI()
         self.stats_api.set_bot(self)
-        self.health_server = HealthCheckServer(self)
 
         # Set up app command error handler
         self.tree.on_error = self._on_app_command_error
@@ -208,30 +205,7 @@ class TrippixnBot(commands.Bot):
         # Start shared HTTP session
         await http_session.start()
 
-        # Start health check server (unified) with system health callback
-        import psutil
-        _psutil_process = psutil.Process()
-
-        async def system_health() -> dict:
-            cpu_percent = psutil.cpu_percent(interval=None)
-            memory = psutil.virtual_memory()
-            disk = psutil.disk_usage("/")
-            bot_memory_mb = _psutil_process.memory_info().rss / (1024 * 1024)
-            return {
-                "cpu_percent": cpu_percent,
-                "memory_percent": memory.percent,
-                "disk_percent": disk.percent,
-                "disk_total_gb": round(disk.total / (1024 ** 3), 1),
-                "disk_used_gb": round(disk.used / (1024 ** 3), 1),
-                "bot_memory_mb": round(bot_memory_mb, 1),
-                "threads": _psutil_process.num_threads(),
-                "open_files": len(_psutil_process.open_files()),
-            }
-
-        self.health_server.register_system(system_health)
-        await self.health_server.start()
-
-        # Start stats API server
+        # Start stats API server (includes /health endpoint)
         await self.stats_api.start()
 
         # =================================================================
@@ -282,11 +256,6 @@ class TrippixnBot(commands.Bot):
         # Start feedback learner (tracks corrections and reactions)
         if not feedback_learner._initialized:
             await feedback_learner.setup()
-
-        # Start bump reminder if configured (only once, not on reconnects)
-        if config.BUMP_CHANNEL_ID and config.BUMP_ROLE_ID and not bump_service._running:
-            bump_service.setup(self, config.BUMP_CHANNEL_ID, config.BUMP_ROLE_ID)
-            bump_service.start()
 
     async def on_presence_update(self, before: discord.Member, after: discord.Member) -> None:
         """Handle presence updates."""
@@ -384,7 +353,6 @@ class TrippixnBot(commands.Bot):
         auto_learner.stop()
         style_learner.stop()
         feedback_learner.stop()
-        bump_service.stop()
         await self.stats_api.stop()
         await http_session.stop()
         await super().close()

@@ -16,12 +16,8 @@ import time
 
 from src.core import config, log
 from src.services import ai_service, stats_store, message_counter, server_intel, rag_service, auto_learner
-from src.services.bump_service import bump_service
 from src.services.feedback_learner import feedback_learner
 from src.services.user_memory import user_memory
-
-# Disboard bot ID
-DISBOARD_BOT_ID = 302050872383242240
 
 
 # Lanyard API URL for fetching real-time presence
@@ -810,19 +806,6 @@ async def on_message(bot: discord.Client, message: discord.Message) -> None:
     # Run periodic memory cleanup
     _cleanup_memory()
 
-    # Check for Disboard bump confirmation (before skipping bots)
-    if message.author.id == DISBOARD_BOT_ID:
-        # Disboard sends an embed with "Bump done!" when successful
-        if message.embeds:
-            for embed in message.embeds:
-                desc = (embed.description or "").lower()
-
-                if "bump done" in desc:
-                    # Record the bump - triggers 2 hour cooldown
-                    bump_service.record_bump()
-                    break
-        return
-
     if message.author.bot:
         return
 
@@ -861,7 +844,12 @@ async def on_message(bot: discord.Client, message: discord.Message) -> None:
 async def on_automod_action(bot: discord.Client, execution: discord.AutoModAction) -> None:
     """
     Handle AutoMod actions - respond with AI when developer ping is blocked.
+
+    DISABLED: Auto-response feature is currently disabled.
     """
+    # Feature disabled - do not auto-respond to pings
+    return
+
     # Only respond to keyword triggers (our developer ping rule)
     if execution.rule_trigger_type != discord.AutoModRuleTriggerType.keyword:
         return

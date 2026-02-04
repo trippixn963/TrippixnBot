@@ -96,10 +96,6 @@ class Config:
     # Moderator role for dashboard display (uses shared MOD_ROLE_ID)
     MODERATOR_ROLE_ID: int = _get_env_int("MOD_ROLE_ID", 0)
 
-    # Bump reminder settings
-    BUMP_CHANNEL_ID: int = _get_env_int("BUMP_CHANNEL_ID", 0)
-    BUMP_ROLE_ID: int = _get_env_int("BUMP_ROLE_ID", 0)
-
     # GitHub settings (for commit tracking)
     GITHUB_USERNAME: str = os.getenv("GITHUB_USERNAME", "trippixn963")
     GITHUB_TOKEN: str = os.getenv("GITHUB_TOKEN", "")
