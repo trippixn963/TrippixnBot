@@ -32,7 +32,6 @@ MS_PER_SECOND = 1000
 # Network & API
 # =============================================================================
 
-HEALTH_CHECK_PORT = 8086
 HTTP_TIMEOUT = 30.0
 WEBHOOK_TIMEOUT = 10.0
 
@@ -96,7 +95,6 @@ __all__ = [
     "SECONDS_PER_DAY",
     "MS_PER_SECOND",
     # Network
-    "HEALTH_CHECK_PORT",
     "HTTP_TIMEOUT",
     "WEBHOOK_TIMEOUT",
     # AI
