@@ -1,1 +1,169 @@
-../requirements.txt
+# =============================================================================
+# UNIFIED REQUIREMENTS - ALL BOTS
+# =============================================================================
+#
+# Master requirements file for all 6 Discord bots:
+# - SyriaBot     (XP, TempVoice, media conversion)
+# - OthmanBot    (News scraping, debates, AI summaries)
+# - AzabBot      (Moderation, tickets, case management)
+# - TahaBot      (24/7 Quran streaming, prayer times)
+# - JawdatBot    (Casino, economy, minigames)
+# - TrippixnBot  (Bot monitoring, AI responder)
+#
+# Location: /root/requirements.txt (VPS) - symlinked from each bot
+# Install:  pip install -r requirements.txt
+#
+# Author: حَـــــنَّـــــا
+# Server: discord.gg/syria
+# =============================================================================
+
+
+# =============================================================================
+# CORE DISCORD
+# =============================================================================
+# Discord.py - Main Discord API library
+# Using master branch for latest reconnection fixes and features
+discord.py @ git+https://github.com/Rapptz/discord.py@master
+
+# PyNaCl - Required for Discord voice functionality
+# Used by: TahaBot (Quran streaming), SyriaBot (TempVoice XP tracking)
+PyNaCl>=1.5.0
+
+
+# =============================================================================
+# ENVIRONMENT & CONFIG
+# =============================================================================
+# Loads environment variables from .env file
+# Used by: ALL BOTS
+python-dotenv>=1.0.0
+
+
+# =============================================================================
+# HTTP & NETWORKING
+# =============================================================================
+# Async HTTP client for API requests and web scraping
+# Used by: ALL BOTS
+aiohttp>=3.9.0
+
+# Brotli compression support for API responses
+# Used by: TahaBot (Aladhan prayer times API)
+brotli>=1.1.0
+
+
+# =============================================================================
+# IMAGE PROCESSING
+# =============================================================================
+# PIL/Pillow - Image manipulation, text rendering, GIF frames
+# Used by: SyriaBot (convert), AzabBot (transcripts), JawdatBot (cards)
+Pillow>=10.0.0
+
+# Wand - ImageMagick Python bindings for high-quality GIF processing
+# Used by: SyriaBot (NotSoBot-style GIF text)
+# Requires system: apt install imagemagick libmagickwand-dev
+Wand>=0.6.0
+
+
+# =============================================================================
+# AUDIO & VIDEO PROCESSING
+# =============================================================================
+# FFmpeg Python wrapper for audio/video handling
+# Used by: TahaBot (Quran audio streaming)
+# Requires system: apt install ffmpeg
+ffmpeg-python>=0.2.0
+
+# Mutagen - Audio metadata extraction (MP3 duration, etc.)
+# Used by: TahaBot (Quran recitation durations)
+mutagen>=1.47.0
+
+# yt-dlp - Video downloading from various platforms
+# Used by: TrippixnBot, SyriaBot (download command)
+yt-dlp>=2024.1.0
+
+
+# =============================================================================
+# WEB SCRAPING & PARSING
+# =============================================================================
+# BeautifulSoup - HTML parsing and content extraction
+# Used by: OthmanBot (news, soccer, gaming scrapers)
+beautifulsoup4>=4.12.2
+
+# FeedParser - RSS/Atom feed parsing
+# Used by: OthmanBot (news feeds)
+feedparser>=6.0.10
+
+
+# =============================================================================
+# AI & MACHINE LEARNING
+# =============================================================================
+# OpenAI API client for GPT integration
+# Used by: OthmanBot (summaries), TrippixnBot (AI responder)
+openai>=1.0.0
+
+# ChromaDB - Vector database for RAG (Retrieval Augmented Generation)
+# Used by: TrippixnBot (context-aware AI responses)
+chromadb>=0.4.0
+
+
+# =============================================================================
+# WEB API & DASHBOARD
+# =============================================================================
+# FastAPI - Modern async web framework for REST API
+# Used by: AzabBot (moderation dashboard API)
+fastapi>=0.109.0
+
+# Uvicorn - ASGI server for FastAPI
+# Used by: AzabBot (API server)
+uvicorn>=0.27.0
+
+# PyJWT - JSON Web Token implementation
+# Used by: AzabBot (dashboard authentication)
+PyJWT>=2.8.0
+
+# Pydantic - Data validation (FastAPI dependency)
+# Ensures compatible version
+pydantic>=2.5.0
+
+
+# =============================================================================
+# UTILITIES
+# =============================================================================
+# Process management and system monitoring
+# Used by: ALL BOTS (single-instance locking, health checks)
+psutil>=7.0.0
+
+# Colored terminal output for logging
+# Used by: SyriaBot, TahaBot (tree logger)
+colorama>=0.4.6
+
+# Timezone handling for prayer times and scheduling
+# Used by: TahaBot (Mecca time), TrippixnBot (EST timestamps)
+pytz>=2024.1
+
+
+# =============================================================================
+# TESTING (Development Only)
+# =============================================================================
+# Pytest framework for unit/integration tests
+# Used by: AzabBot tests
+pytest>=7.4.0
+
+# Async test support for pytest
+pytest-asyncio>=0.21.0
+
+# Discord.py testing utilities
+dpytest>=0.7.0
+
+
+# =============================================================================
+# SYSTEM DEPENDENCIES (Not pip installable)
+# =============================================================================
+#
+# These must be installed via system package manager:
+#
+# FFmpeg (audio/video processing):
+#   apt install ffmpeg
+#
+# ImageMagick (GIF processing via Wand):
+#   apt install imagemagick libmagickwand-dev
+#
+# =============================================================================
