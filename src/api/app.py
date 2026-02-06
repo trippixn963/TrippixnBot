@@ -112,9 +112,9 @@ def create_app(api_service: Optional[Any] = None) -> FastAPI:
 
     from src.api.routers import health, stats, avatar
 
-    app.include_router(health.router)
-    app.include_router(stats.router)
-    app.include_router(avatar.router)
+    app.include_router(health.router, prefix="/api")
+    app.include_router(stats.router, prefix="/api")
+    app.include_router(avatar.router, prefix="/api")
 
     return app
 

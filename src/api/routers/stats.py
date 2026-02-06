@@ -17,7 +17,7 @@ from src.api.models.base import APIResponse
 from src.api.models.stats import PortfolioStats
 
 
-router = APIRouter(prefix="/api", tags=["Stats"])
+router = APIRouter(tags=["Stats"])
 
 
 @router.get("/stats", response_model=APIResponse[PortfolioStats])
