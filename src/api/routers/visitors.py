@@ -8,13 +8,33 @@ Author: حَـــــنَّـــــا
 """
 
 import sqlite3
-from datetime import datetime, date
+import hashlib
+from datetime import datetime, date, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from src.core import log
+
+
+# Bot detection
+
+BOT_PATTERNS = [
+    'bot', 'crawler', 'spider', 'curl', 'wget', 'python', 'scrapy',
+    'headless', 'phantom', 'selenium', 'puppeteer', 'lighthouse'
+]
+
+
+def is_bot(user_agent: str) -> bool:
+    """Check if request is from a bot."""
+    ua_lower = user_agent.lower()
+    return any(bot in ua_lower for bot in BOT_PATTERNS)
+
+
+def hash_ip(ip: str) -> str:
+    """Hash IP for privacy."""
+    return hashlib.sha256(ip.encode()).hexdigest()[:16]
 
 
 # Models
@@ -90,30 +110,38 @@ async def get_visitors() -> VisitorData:
 @router.post("/visitors/track")
 async def track_visitor(request: Request) -> VisitorData:
     """Track a visitor and return updated count."""
+    # Check for bots
+    user_agent = request.headers.get("user-agent", "")
+    if is_bot(user_agent):
+        # Return current count without tracking
+        return await get_visitors()
+
     # Get client IP (handle proxies)
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
-        ip = forwarded.split(",")[0].strip()
+        raw_ip = forwarded.split(",")[0].strip()
     else:
-        ip = request.client.host if request.client else "unknown"
+        raw_ip = request.client.host if request.client else "unknown"
 
+    # Hash IP for privacy
+    ip_hash = hash_ip(raw_ip)
     today = date.today().isoformat()
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     conn = get_db()
     c = conn.cursor()
 
     # Check if already tracked today
-    c.execute("SELECT 1 FROM visitors WHERE ip = ? AND visit_date = ?", (ip, today))
+    c.execute("SELECT 1 FROM visitors WHERE ip = ? AND visit_date = ?", (ip_hash, today))
     already_tracked = c.fetchone() is not None
 
     if not already_tracked:
         c.execute(
             "INSERT INTO visitors (ip, visited_at, visit_date) VALUES (?, ?, ?)",
-            (ip, now, today)
+            (ip_hash, now, today)
         )
         conn.commit()
-        log.debug("Visitor Tracked", [("IP", ip[:16] + "...")])
+        log.debug("Visitor Tracked", [("Hash", ip_hash[:8])])
 
     # Get counts
     c.execute("SELECT COUNT(DISTINCT ip || '-' || visit_date) FROM visitors")
