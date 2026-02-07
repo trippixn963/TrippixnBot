@@ -15,7 +15,7 @@ from typing import Optional, List, Dict, Any
 from zoneinfo import ZoneInfo
 
 from src.core import config, log
-from src.services import get_stats_store, message_counter, member_tracker
+from src.services import get_stats_store, member_tracker
 from src.utils.http import http_session
 
 
@@ -233,9 +233,6 @@ async def on_ready(bot: discord.Client) -> None:
             _dev_presence_cache["status"] = STATUS_MAP.get(dev_member.status, "offline")
             _dev_presence_cache["activities"] = _parse_activities(dev_member.activities)
 
-    # Start message counter
-    await message_counter.start()
-
     # Update member tracker
     if guild:
         member_tracker.update(guild.member_count)
@@ -344,8 +341,8 @@ async def collect_stats(bot: discord.Client) -> None:
                 "online_count": online_count,
                 "boost_level": guild.premium_tier,
                 "boost_count": guild.premium_subscription_count or 0,
-                "total_messages": 0,  # Using SyriaBot's count instead
-                "chat_active": message_counter.is_active(),
+                "total_messages": 0,
+                "chat_active": False,
                 "created_at": guild.created_at.isoformat(),
                 "moderators": moderators,
             },

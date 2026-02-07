@@ -17,7 +17,7 @@ from discord.ext import commands
 
 from src.core import config, log
 from src.services import get_api_service
-from src.handlers import on_ready, on_presence_update, on_message
+from src.handlers import on_ready, on_presence_update
 from src.utils import http_session
 
 
@@ -132,10 +132,6 @@ class TrippixnBot(commands.Bot):
     async def on_presence_update(self, before: discord.Member, after: discord.Member) -> None:
         """Handle presence updates for developer status tracking."""
         await on_presence_update(self, before, after)
-
-    async def on_message(self, message: discord.Message) -> None:
-        """Handle incoming messages for message counting."""
-        await on_message(self, message)
 
     # =========================================================================
     # Guild Protection
