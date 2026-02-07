@@ -344,7 +344,7 @@ async def collect_stats(bot: discord.Client) -> None:
                 "online_count": online_count,
                 "boost_level": guild.premium_tier,
                 "boost_count": guild.premium_subscription_count or 0,
-                "total_messages": message_counter.get_count(),
+                "total_messages": 0,  # Using SyriaBot's count instead
                 "chat_active": message_counter.is_active(),
                 "created_at": guild.created_at.isoformat(),
                 "moderators": moderators,
