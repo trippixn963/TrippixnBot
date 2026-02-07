@@ -99,6 +99,7 @@ async def fetch_github_commits() -> Optional[dict]:
             calendar = contributions.get("contributionCalendar", {})
             weeks = calendar.get("weeks", [])
 
+            # Extract calendar days (last 90 days only to reduce payload)
             contribution_days = []
             for week in weeks:
                 for day in week.get("contributionDays", []):
@@ -107,6 +108,9 @@ async def fetch_github_commits() -> Optional[dict]:
                         "count": day.get("contributionCount", 0),
                         "level": day.get("contributionLevel", "NONE"),
                     })
+
+            # Trim to last 90 days
+            contribution_days = contribution_days[-90:]
 
             return {
                 "total": total_commits,

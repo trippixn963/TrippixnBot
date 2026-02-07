@@ -16,6 +16,7 @@ from typing import Optional
 
 from src.core import log
 from src.api.services.github import fetch_github_commits
+from src.api.services.websocket import get_ws_manager
 
 
 class StatsStore:
@@ -120,7 +121,7 @@ class StatsStore:
                 pass
 
     async def update(self, **kwargs) -> None:
-        """Update stats."""
+        """Update stats and broadcast to WebSocket clients."""
         async with self._lock:
             for key, value in kwargs.items():
                 if key in self._stats:
@@ -128,6 +129,14 @@ class StatsStore:
                         self._stats[key].update(value)
                     else:
                         self._stats[key] = value
+
+        # Broadcast update to WebSocket clients
+        ws_manager = get_ws_manager()
+        if ws_manager.connection_count > 0:
+            await ws_manager.broadcast({
+                "type": "stats",
+                "data": self._stats.copy(),
+            })
 
     async def get(self) -> dict:
         """Get current stats."""
